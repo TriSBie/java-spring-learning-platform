@@ -123,6 +123,13 @@ export default function LessonPage({ params }: PageParams) {
             components={mdxComponents}
             options={{
               parseFrontmatter: true,
+              // next-mdx-remote v6 blocks JS expressions in MDX by default
+              // (blockJS: true). Our lesson content is first-party, trusted
+              // (authored in this repo) and uses template-literal expressions
+              // for <Mermaid chart={`...`} />, so expressions must stay
+              // enabled; blockDangerousJS remains at its default (true),
+              // which still guards eval/Function/process/require.
+              blockJS: false,
               mdxOptions: {
                 remarkPlugins: [remarkGfm, remarkCodeMeta],
                 rehypePlugins: [rehypeSlug, rehypeHighlight],
