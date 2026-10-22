@@ -1,0 +1,206 @@
+---
+title: "ConfigurationProperties, profiles và Configuration so với Component"
+module: 2
+level: "Junior"
+duration: 40
+order: 2
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Khai báo và bind được `@ConfigurationProperties` kiểu record/class với validation, thay cho việc rải rác `@Value` khắp codebase.
+- Kích hoạt và tổ chức được Spring profiles cho từng môi trường, hiểu thứ tự ưu tiên của nguồn cấu hình.
+- Phân biệt chính xác `@Configuration` và `@Component`, đặc biệt là hành vi proxy của method đánh dấu `@Bean` trong class cấu hình đầy đủ.
+
+## Vì sao cần biết
+
+Nova Loyalty chạy cùng một bản build qua nhiều môi trường: máy dev, staging và production sau load balancer. Mỗi môi trường khác nhau ở thông số của 5 pool HikariCP, địa chỉ Kafka, thời gian draining 75 giây của CRM consumer, và cờ bật virtual thread. Nếu các giá trị này rải rác dưới dạng `@Value` với giá trị mặc định chép tay ở hàng chục nơi, một lần đổi tên khóa cấu hình sẽ để lại những nơi âm thầm dùng giá trị mặc định sai ở production. Gom cấu hình theo miền vào `@ConfigurationProperties` có validate ngay lúc khởi động biến lỗi cấu hình thành lỗi fail-fast, dễ thấy. Hiểu đúng profiles và `@Configuration` cũng quyết định việc cùng một artifact lên production có thật sự dùng đúng cấu hình production hay không.
+
+## Nội dung chính
+
+### @ConfigurationProperties: bind theo cấu trúc có kiểu
+
+`@ConfigurationProperties` bind cả một cây thuộc tính có tiền tố chung vào một object có kiểu, thường là record hoặc class có constructor binding trong Boot 3. Các bước chuẩn:
+
+- Đặt tiền tố phản ánh miền cấu hình, ví dụ `nova.loyalty.pool`.
+- Bật đăng ký bằng `@ConfigurationPropertiesScan` trên application class hoặc `@EnableConfigurationProperties`.
+- Dùng nested object cho nhóm thuộc tính con, `Duration`/`DataSize` cho đơn vị có ngữ nghĩa thay vì số thô.
+- Thêm validation bằng các annotation của Bean Validation trên component/field; ứng dụng fail-fast lúc khởi động khi cấu hình sai.
+
+Khác với `@Value` — phù hợp cho một vài giá trị đơn lẻ — properties object cho phép review toàn bộ bề mặt cấu hình của một miền tại một chỗ, có kiểu dữ liệu rõ ràng và test được độc lập.
+
+### Profiles và thứ tự nguồn cấu hình
+
+Profile là nhãn môi trường/nhóm tính năng để kích hoạt có điều kiện các bean và tài liệu cấu hình riêng. Cách dùng chuẩn:
+
+- Kích hoạt bằng thuộc tính `spring.profiles.active` hoặc biến môi trường tương ứng.
+- File cấu hình riêng theo profile nạp các giá trị khác nhau cho cùng một khóa.
+- Bean gắn profile bằng annotation `@Profile` khi thật sự cần implementation khác theo môi trường.
+
+Thứ tự ưu tiên của nguồn cấu hình trong Boot đi từ cụ thể tới mặc định: đối số dòng lệnh và biến môi trường thắng thuộc tính trong file, file theo profile thắng file chung. Hiểu thứ tự này để tránh tình huống "đã sửa file nhưng production vẫn dùng giá trị cũ do biến môi trường ghi đè".
+
+### @Configuration so với @Component
+
+Cả hai đều làm class trở thành bean, nhưng khác nhau ở một điểm cốt lõi:
+
+- `@Configuration` là `@Component` cộng thêm xử lý đặc biệt: class được proxy (CGLIB) để các lời gọi tới method `@Bean` từ bên trong cùng class cũng trả về cùng một singleton mà container quản lý. Đây gọi là full mode.
+- `@Component` chứa method `@Bean` vẫn đăng ký được bean cho từng method, nhưng lời gọi nội bộ tới method `@Bean` khác sẽ là lời gọi Java thông thường, tạo object mới không qua container — lite mode.
+
+Quy tắc thực hành: class nào khai báo các `@Bean` có quan hệ phụ thuộc lẫn nhau thì phải là `@Configuration`. Class cấu hình thuần chứa properties binding có thể là `@Component` hoặc chỉ cần annotation properties.
+
+<Mermaid chart={`flowchart TD
+  A["Đối số dòng lệnh và biến môi trường"] --> B["Thuộc tính file theo profile"]
+  B --> C["Thuộc tính file chung"]
+  C --> D["Giá trị mặc định trong code"]
+  D --> E["Bind vào ConfigurationProperties và validate"]`} label="Thứ tự ưu tiên nguồn cấu hình ở Nova Loyalty: nguồn càng cụ thể càng thắng, lỗi validate làm ứng dụng fail-fast lúc khởi động." />
+
+### Đặt tên và quy ước nhóm khóa
+
+Khóa cấu hình dùng kebab-case, nhóm theo miền rồi tới thành phần: ví dụ tiền tố pool cho datasource core khác tiền tố pool cho audit. Việc nhóm nhất quán giúp file cấu hình của 5 datasource đọc như một bảng đối chiếu, và giúp phát hiện khóa lạ hoặc khóa thiếu ngay khi review.
+
+## Code
+
+Cần thêm dependency `spring-boot-starter-validation` trong `pom.xml` để validation trên properties có hiệu lực.
+
+Record properties cho pool điểm, validate đầy đủ:
+
+```java filename=LoyaltyPoolProperties.java
+package com.nova.loyalty.config;
+
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+import java.time.Duration;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.validation.annotation.Validated;
+
+@Validated
+@ConfigurationProperties(prefix = "nova.loyalty.pool")
+public record LoyaltyPoolProperties(
+        @NotBlank String coreJdbcUrl,
+        @Min(1) @Max(100) int coreMaximumPoolSize,
+        Duration coreConnectionTimeout,
+        Duration drainingTimeout) {
+
+    public LoyaltyPoolProperties {
+        if (coreConnectionTimeout == null) {
+            coreConnectionTimeout = Duration.ofSeconds(30);
+        }
+        if (drainingTimeout == null) {
+            drainingTimeout = Duration.ofSeconds(75);
+        }
+    }
+}
+```
+
+File cấu hình theo môi trường, cùng khóa khác giá trị:
+
+```properties filename=application-prod.properties
+nova.loyalty.pool.core-jdbc-url=jdbc:postgresql://core-db:5432/nova_core
+nova.loyalty.pool.core-maximum-pool-size=30
+nova.loyalty.pool.core-connection-timeout=20s
+nova.loyalty.pool.draining-timeout=75s
+spring.threads.virtual.enabled=true
+```
+
+Class cấu hình full mode: method `@Bean` gọi nhau vẫn nhận cùng singleton do proxy của `@Configuration`:
+
+```java filename=PointsBeansConfig.java
+package com.nova.loyalty.config;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class PointsBeansConfig {
+
+    @Bean
+    public OutboxEventWriter outboxEventWriter() {
+        return new OutboxEventWriter(pointsClock());
+    }
+
+    @Bean
+    public java.time.Clock pointsClock() {
+        return java.time.Clock.systemUTC();
+    }
+}
+```
+
+Và cách bật quét properties ngay trên application class:
+
+```java filename=LoyaltyApplication.java
+package com.nova.loyalty;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
+
+@SpringBootApplication
+@ConfigurationPropertiesScan
+public class LoyaltyApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(LoyaltyApplication.class, args);
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Rải rác Value khắp nơi với mặc định chép tay
+
+- **Triệu chứng:** Đổi tên một khóa cấu hình, vài nơi vẫn lặng lẽ dùng giá trị mặc định cũ ở production.
+- **Nguyên nhân:** Mỗi `@Value` là một điểm cấu hình độc lập, không có nơi nào tổng hợp và kiểm tra được toàn bộ bề mặt cấu hình.
+- **Fix:** Gom cấu hình theo miền vào `@ConfigurationProperties` có validation, fail-fast lúc khởi động.
+
+### 2. Quên bật đăng ký cho properties class
+
+- **Triệu chứng:** Bean properties không tồn tại trong context, hoặc mọi field đều mang giá trị mặc định của kiểu.
+- **Nguyên nhân:** Thiếu `@ConfigurationPropertiesScan` hoặc `@EnableConfigurationProperties`, container không bind class đó.
+- **Fix:** Khai báo rõ cơ chế đăng ký trên application class và kiểm tra bằng một test khởi động context.
+
+### 3. Dùng Component cho class có các Bean phụ thuộc nhau
+
+- **Triệu chứng:** Hai bean được tạo từ cùng một method `@Bean` lại là hai instance khác nhau, trạng thái dùng chung bị tách đôi.
+- **Nguyên nhân:** Ở lite mode của `@Component`, lời gọi nội bộ tới method `@Bean` không đi qua proxy của container.
+- **Fix:** Dùng `@Configuration` cho mọi class cấu hình có các `@Bean` gọi lẫn nhau.
+
+### 4. Kỳ vọng file cấu hình thắng biến môi trường
+
+- **Triệu chứng:** Đã sửa file cấu hình production nhưng ứng dụng vẫn chạy giá trị cũ.
+- **Nguyên nhân:** Thứ tự ưu tiên đặt biến môi trường và đối số dòng lệnh cao hơn thuộc tính trong file.
+- **Fix:** Kiểm tra nguồn cấu hình hiệu lực qua endpoint môi trường của Actuator ở môi trường cho phép, và dọn biến môi trường thừa.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay (viết, vẽ sơ đồ, đọc code) — không có chấm tự động.
+
+1. **Viết code:** Khai báo record `@ConfigurationProperties` cho nhóm cấu hình Kafka của Nova Loyalty gồm địa chỉ broker, thời gian timeout của consumer và số lần retry tối đa, có validation hợp lý.
+2. **Đọc code trả lời:** Đọc `PointsBeansConfig` ở mục Code: nếu đổi `@Configuration` thành `@Component` thì `outboxEventWriter` và bean `pointsClock` của container có còn là cùng một instance đồng hồ không? Vì sao?
+3. **Vẽ sơ đồ:** Vẽ thứ tự ưu tiên của 4 nguồn cấu hình cho một khóa cụ thể và một ví dụ giá trị khác nhau ở từng nguồn, kết luận giá trị hiệu lực cuối cùng.
+4. **Viết tay kế hoạch:** Viết kế hoạch chuyển 8 khóa `@Value` rải rác trong một service giả định về một properties object duy nhất, gồm bước gom nhóm, đặt tiền tố và thêm validation.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Boot — Externalized Configuration: https://docs.spring.io/spring-boot/reference/features/external-config.html
+- Spring Boot — Configuration Properties: https://docs.spring.io/spring-boot/reference/features/external-config.html
+- Spring Framework — Bean Annotation và cấu hình: https://docs.spring.io/spring-framework/reference/core/beans/annotation-config.html
+- Spring Boot — Profiles: https://docs.spring.io/spring-boot/reference/features/profiles.html
+
+## Đọc thêm
+
+Không có.

@@ -1,0 +1,181 @@
+---
+title: "SecurityFilterChain và thứ tự filter trong Spring Security 6"
+module: 4
+level: "Middle"
+duration: 45
+order: 1
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Spring Security 6.3.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Cấu hình được một bean `SecurityFilterChain` hoàn chỉnh bằng `authorizeHttpRequests` và `requestMatchers` cho API stateless.
+- Giải thích được thứ tự chạy của các filter chính trong chain và chỉ ra vị trí đúng để chèn custom filter.
+- Phân biệt được khi nào cần nhiều chain với `@Order` khác nhau và cách tránh cấu hình bị chain này nuốt mất chain kia.
+
+## Vì sao cần biết
+
+Nova Loyalty là nền tảng loyalty Java 21 / Spring Boot 3 phục vụ nhiều nhóm client qua gateway với các route `/v4/{gs,os,ws}/*`. Mỗi route nhóm có yêu cầu bảo mật khác nhau: nhóm dành cho khách hàng cần JWT, nhóm vận hành nội bộ cần kiểm soát chặt hơn, còn endpoint health check phải mở cho load balancer. Nếu cấu hình filter chain sai thứ tự hoặc viết matcher quá rộng, hệ quả không phải là lỗi biên dịch mà là một lỗ hổng âm thầm: endpoint quản trị bị mở công khai, hoặc ngược lại toàn bộ API trả 401 dù token hợp lệ. Nắm vững `SecurityFilterChain` là nền tảng cho mọi bài còn lại của module này.
+
+## Nội dung chính
+
+### SecurityFilterChain là gì
+
+Từ Spring Security 6, cách cấu hình chuẩn là khai báo một hoặc nhiều bean `SecurityFilterChain`. Mỗi bean mô tả một chuỗi filter áp dụng cho một tập request khớp với điều kiện của nó. Framework xây dựng một `FilterChainProxy` chứa danh sách các chain đã sắp xếp; request đến sẽ đi qua chain đầu tiên khớp, và chỉ chain đó.
+
+Điều này khác hẳn cách cấu hình adapter kiểu cũ: không còn kế thừa lớp cấu hình, không override method, mà là composition bằng bean. Lợi ích là nhiều chain độc lập có thể sống cạnh nhau và được test riêng.
+
+### Thứ tự filter bên trong một chain
+
+Bên trong một chain, các filter chạy theo thứ tự cố định do framework quy định, ví dụ:
+
+- Filter xử lý CORS chạy rất sớm để preflight request không bị chặn bởi các bước sau.
+- Filter chống CSRF, filter tạo `SecurityContext`, filter xác thực (username/password, bearer token) chạy ở giữa.
+- Filter phân quyền cuối cùng (`AuthorizationFilter`) chạy gần cuối, sau khi danh tính đã được xác lập.
+
+Bạn không sắp xếp tay từng filter mặc định. Việc của bạn là khai báo ý định qua DSL (`http.authorizeHttpRequests`, `http.oauth2ResourceServer`...) và khi thêm custom filter thì chỉ rõ vị trí tương đối bằng `addFilterBefore`, `addFilterAfter` hoặc `addFilterAt`.
+
+<Mermaid chart={`flowchart TD
+  A[Request HTTP] --> B[FilterChainProxy]
+  B --> C{Chain nao khop dau tien}
+  C -->|API chain| D[CORS filter]
+  D --> E[SecurityContext filter]
+  E --> F[Bearer / JWT filter]
+  F --> G[AuthorizationFilter]
+  G --> H[Controller]
+  C -->|Actuator chain| I[Health check mo cong khai]
+`} label="FilterChainProxy chọn chain đầu tiên khớp; bên trong chain, phân quyền luôn chạy sau xác thực." />
+
+### authorizeHttpRequests và requestMatchers
+
+DSL hiện đại dùng `authorizeHttpRequests` kết hợp `requestMatchers` để gắn rule cho từng nhóm path và HTTP method. Nguyên tắc vàng: khai báo rule cụ thể trước, rule tổng quát sau, và luôn kết thúc bằng một rule mặc định rõ ràng như `anyRequest().authenticated()` hoặc `anyRequest().denyAll()`.
+
+Thứ tự khai báo quan trọng hơn thứ tự bạn nghĩ: framework đánh giá rule theo đúng thứ tự viết, rule đầu tiên khớp sẽ quyết định. Một dòng `requestMatchers("/v4/**").permitAll()` đặt ở đầu sẽ vô hiệu hóa mọi rule chặt chẽ phía dưới.
+
+### Nhiều chain và @Order
+
+Khi hệ thống có nhiều bề mặt khác nhau (API công khai, API nội bộ, actuator), hãy tách thành nhiều bean và gán `@Order`. Chain có order nhỏ hơn được xét trước. Mỗi chain nên tự giới hạn phạm vi bằng `securityMatcher` để không vô tình khớp với request thuộc chain khác.
+
+Ở Nova Loyalty, pattern thực tế là: chain order 1 cho actuator và health, chain order 2 cho API qua gateway, chain mặc định cuối cùng deny-all để fail closed khi có path lạ xuất hiện.
+
+### Stateless session
+
+API dùng JWT thường đặt `SessionCreationPolicy.STATELESS`: framework không tạo HTTP session, không lưu `SecurityContext` vào session. Mỗi request tự mang token và tự xác thực lại. Điều này giúp service scale ngang không cần sticky session.
+
+## Code
+
+Cần dependency `spring-boot-starter-security` và `spring-boot-starter-oauth2-resource-server` trong `pom.xml` nếu dùng bearer token.
+
+```java filename=SecurityConfig.java
+package com.nova.loyalty.security;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.annotation.Order;
+import org.springframework.security.config.Customizer;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.web.SecurityFilterChain;
+
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+
+    @Bean
+    @Order(1)
+    public SecurityFilterChain actuatorChain(HttpSecurity http) throws Exception {
+        http
+            .securityMatcher("/actuator/**", "/health/**")
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/actuator/health", "/health/**").permitAll()
+                .anyRequest().denyAll())
+            .csrf(csrf -> csrf.disable())
+            .sessionManagement(session -> session
+                .sessionCreationPolicy(SessionCreationPolicy.STATELESS));
+        return http.build();
+    }
+
+    @Bean
+    @Order(2)
+    public SecurityFilterChain apiChain(HttpSecurity http) throws Exception {
+        http
+            .securityMatcher("/v4/**")
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/v4/gs/public/**").permitAll()
+                .requestMatchers("/v4/os/admin/**").hasRole("OPS_ADMIN")
+                .requestMatchers("/v4/ws/**").hasAnyRole("PARTNER", "OPS_ADMIN")
+                .anyRequest().authenticated())
+            .oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()))
+            .csrf(csrf -> csrf.disable())
+            .sessionManagement(session -> session
+                .sessionCreationPolicy(SessionCreationPolicy.STATELESS));
+        return http.build();
+    }
+}
+```
+
+Cấu hình issuer cho JWT trong `application.yml`:
+
+```yaml filename=application.yml
+spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: https://auth.nova.example.com
+server:
+  forward-headers-strategy: framework
+```
+
+## Sai lầm thường gặp
+
+### 1. Rule permitAll quá rộng đặt ở đầu
+
+- **Triệu chứng:** Endpoint quản trị ai cũng gọi được không cần token, test bảo mật mới phát hiện.
+- **Nguyên nhân:** Khai báo `requestMatchers` với pattern tổng quát như `/v4/**` và `permitAll` trước các rule cụ thể; rule đầu tiên khớp sẽ thắng.
+- **Fix:** Sắp xếp rule từ cụ thể đến tổng quát, kết thúc bằng `anyRequest().authenticated()` hoặc `denyAll()`, và viết test cho từng nhóm path.
+
+### 2. Quên securityMatcher khi có nhiều chain
+
+- **Triệu chứng:** Thêm chain mới cho actuator nhưng toàn bộ API bỗng áp dụng rule của chain đó.
+- **Nguyên nhân:** Chain không có `securityMatcher` sẽ khớp với mọi request và, nếu order nhỏ hơn, nó nuốt hết các chain sau.
+- **Fix:** Mỗi chain tự giới hạn bằng `securityMatcher`, gán `@Order` rõ ràng, và có chain cuối cùng fail closed.
+
+### 3. Chèn custom filter sai vị trí
+
+- **Triệu chứng:** Filter đọc `SecurityContext` nhưng luôn nhận anonymous, hoặc filter chạy hai lần trong một request.
+- **Nguyên nhân:** Đặt filter sau `AuthorizationFilter`, hoặc đăng ký filter vừa như bean vừa qua `addFilter` khiến nó chạy ở hai tầng.
+- **Fix:** Chèn filter bằng `addFilterBefore` so với filter xác thực chuẩn, tránh đăng ký trùng, và kiểm chứng bằng log thứ tự filter khi bật debug có kiểm soát.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được; trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay, không có chấm tự động.
+
+1. Vẽ sơ đồ các chain cho Nova Loyalty gồm ba bề mặt: actuator, API khách hàng qua route `/v4/{gs,os,ws}/*`, và API nội bộ. Ghi rõ `@Order` và `securityMatcher` cho từng chain.
+2. Cho một danh sách rule bị xáo trộn thứ tự, hãy sắp xếp lại từ cụ thể đến tổng quát và giải thích rule nào sẽ thắng với request `GET /v4/os/admin/members`.
+3. Viết một test ý tưởng (mô tả bằng lời) chứng minh endpoint health mở công khai nhưng endpoint admin trả 401 khi không có token và 403 khi token thiếu role.
+4. Đọc lại cấu hình ở mục Code và trả lời: nếu bỏ dòng chain mặc định deny-all thì rủi ro gì xuất hiện khi team thêm một controller mới quên gắn rule?
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Security — Architecture và Filter Chain: https://docs.spring.io/spring-security/reference/servlet/architecture.html
+- Spring Security — Authorize HTTP Requests: https://docs.spring.io/spring-security/reference/servlet/authorization/authorize-http-requests.html
+- Spring Boot — Security Reference: https://docs.spring.io/spring-boot/reference/web/spring-security.html
+
+## Đọc thêm
+
+Không có.

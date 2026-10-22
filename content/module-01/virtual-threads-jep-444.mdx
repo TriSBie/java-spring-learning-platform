@@ -1,0 +1,213 @@
+---
+title: "Virtual Threads — JEP 444 và Spring Boot 3"
+module: 1
+level: "Middle"
+duration: 50
+order: 3
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Micrometer 1.13.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Giải thích được mô hình carrier thread và mount/unmount của virtual thread, phân biệt với platform thread và với lập trình reactive.
+- Bật và kiểm chứng được virtual thread trong Spring Boot 3 qua thuộc tính `spring.threads.virtual.enabled`, đồng thời nhận diện được hiện tượng pinning do `synchronized`.
+- Quyết định được khi nào dùng virtual thread cho workload I/O-bound và khi nào không dùng cho CPU-bound hoặc khi downstream có pool giới hạn.
+
+## Vì sao cần biết
+
+Các pod của Nova Loyalty chạy sau load balancer và phục vụ traffic qua gateway `/v4/{gs,os,ws}/*`. Phần lớn request là I/O-bound: chờ query vào một trong 5 datasource, chờ gọi CRM, chờ cache. Với mô hình thread-per-request truyền thống, mỗi request đang chờ chiếm một platform thread đắt đỏ, nên số request đồng thời bị giới hạn bởi kích thước thread pool của servlet container chứ không phải bởi khả năng của database hay của CPU. Virtual thread cho phép mỗi request có thread riêng với chi phí rẻ, mở khoá concurrency lớn cho đúng loại workload này. Nhưng nếu dùng sai — gặp pinning vì `synchronized` trong thư viện cũ, hoặc dồn hàng chục nghìn request xuống một connection pool HikariCP nhỏ — hệ thống không nhanh hơn mà chỉ sập theo cách khó chẩn đoán hơn.
+
+## Nội dung chính
+
+### Platform thread và bài toán chi phí
+
+Platform thread là wrapper mỏng trên OS thread: mỗi thread tốn bộ nhớ stack đáng kể và việc tạo/destroy/chuyển ngữ cảnh đều đắt. Vì vậy ứng dụng thường giới hạn số thread bằng pool vài trăm. Khi mỗi thread bị block chờ I/O, throughput bị chặn bởi số thread, dù CPU đang nhàn.
+
+Virtual thread (JEP 444, chính thức trong Java 21) là thread nhẹ do JVM quản lý. Nhiều virtual thread được multiplex lên một số ít carrier thread (là platform thread thuộc một ForkJoinPool riêng). Khi một virtual thread block ở thao tác I/O hỗ trợ, JVM unmount nó khỏi carrier, giải phóng carrier cho virtual thread khác chạy; khi I/O xong, virtual thread được mount lại và tiếp tục. Code vẫn viết theo phong cách đồng bộ, tuần tự, dễ đọc và dễ debug bằng stack trace đầy đủ.
+
+### Pinning: khi virtual thread không rời carrier được
+
+Pinning xảy ra khi virtual thread bị block trong lúc đang giữ một monitor `synchronized`, hoặc khi block bên trong native frame qua JNI/foreign function. Lúc đó JVM không unmount được, carrier thread bị chiếm suốt thời gian chờ và lợi ích của virtual thread biến mất ở đúng đoạn code đó. Hệ quả thực tế:
+
+- Thư viện cũ dùng `synchronized` quanh lời gọi I/O là nguồn pinning phổ biến.
+- Có thể phát hiện pinning bằng JDK Flight Recorder event `jdk.VirtualThreadPinned` hoặc tuỳ chọn chẩn đoán khi phát triển.
+- Cách khắc phục: thay `synchronized` bằng `ReentrantLock` ở đoạn code tự quản lý, nâng cấp thư viện, hoặc chấp nhận pinning nếu đoạn block rất ngắn và không phải I/O chờ lâu.
+
+> [!WARNING] Cần verify với docs version JDK 21 đang dùng thực tế: danh sách trường hợp gây pinning và hành vi của `synchronized` với virtual thread có thay đổi ở các bản JDK sau 21; hãy đối chiếu release notes của bản JDK deploy trước khi kết luận về một đoạn code cụ thể.
+
+### Bật virtual thread trong Spring Boot 3
+
+Spring Boot 3.3.x hỗ trợ virtual thread qua một thuộc tính duy nhất: đặt `spring.threads.virtual.enabled=true` thì Boot cấu hình executor cho web server, cho `@Async` và cho các thành phần framework khác dùng virtual thread. Không cần tự tạo `Thread.ofVirtual()` cho luồng request thông thường.
+
+Điểm cần nhớ: bật virtual thread không thay đổi các giới hạn downstream. Connection pool, semaphore của client thư viện, rate limit của đối tác vẫn giữ nguyên vai trò "van tiết lưu". Virtual thread gỡ nút thắt ở tầng thread, và sẽ làm nút thắt thật sự ở tầng dưới lộ ra rõ hơn.
+
+<Mermaid chart={`flowchart LR
+  A["Request 1 - virtual thread"] --> C["Carrier thread"]
+  B["Request 2 - virtual thread"] --> C
+  D["Request 3 dang cho DB - unmount"] -.-> C
+  C --> E["ForkJoinPool carrier"]
+  E --> F["OS thread"]`} label="Mô hình virtual thread: nhiều virtual thread chia sẻ số ít carrier thread; thread chờ I/O được unmount để nhường carrier." />
+
+### Khi nào KHÔNG dùng virtual thread
+
+- Workload CPU-bound thuần tuý (mã hoá nặng, xử lý ảnh, tính toán): virtual thread không tạo thêm CPU; vẫn cần giới hạn concurrency theo số core.
+- Khi cần thread-local nặng theo kiểu cache dữ liệu lớn trên mỗi thread: số virtual thread rất lớn làm các cache theo thread phình bộ nhớ.
+- Khi downstream chỉ chịu được concurrency thấp mà chưa có cơ chế giới hạn (bulkhead/semaphore): virtual thread sẽ khuếch đại tải xuống downstream.
+
+Nguyên tắc thực dụng: virtual thread để chờ rẻ hơn, không phải để chạy nhanh hơn.
+
+## Code
+
+Cần dependency `spring-boot-starter-web` trong `pom.xml`. Bật virtual thread bằng cấu hình:
+
+```properties filename=application.properties
+spring.threads.virtual.enabled=true
+server.shutdown=graceful
+```
+
+Endpoint I/O-bound điển hình: chờ query số dư và chờ gọi tra cứu trạng thái quà, viết đồng bộ hoàn toàn:
+
+```java filename=MemberSummaryController.java
+package com.nova.loyalty.member;
+
+import java.time.Duration;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/v4/os/members")
+public class MemberSummaryController {
+
+    private static final Logger log = LoggerFactory.getLogger(MemberSummaryController.class);
+
+    private final MemberSummaryService summaryService;
+
+    public MemberSummaryController(MemberSummaryService summaryService) {
+        this.summaryService = summaryService;
+    }
+
+    @GetMapping("/{memberId}/summary")
+    public MemberSummary summary(@PathVariable Long memberId) {
+        log.info("Handling summary on thread {}", Thread.currentThread());
+        return summaryService.loadSummary(memberId);
+    }
+
+    public record MemberSummary(Long memberId, long balance, int activeGifts) {
+    }
+}
+```
+
+Đoạn code minh hoạ pinning và cách thay `synchronized` bằng `ReentrantLock` cho vùng code tự quản lý có chứa thao tác chờ:
+
+```java filename=LegacyTokenCache.java
+package com.nova.loyalty.member;
+
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
+
+public class LegacyTokenCache {
+
+    private final Map<String, String> cache = new HashMap<>();
+    private final ReentrantLock lock = new ReentrantLock();
+
+    public String getOrLoad(String key, Supplier<String> loader) {
+        lock.lock();
+        try {
+            String existing = cache.get(key);
+            if (existing != null) {
+                return existing;
+            }
+            String loaded = loader.get();
+            cache.put(key, loaded);
+            return loaded;
+        } finally {
+            lock.unlock();
+        }
+    }
+}
+```
+
+Và một executor tự tạo cho tác vụ nền khi cần dùng trực tiếp API:
+
+```java filename=VirtualExecutorConfig.java
+package com.nova.loyalty.member;
+
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class VirtualExecutorConfig {
+
+    @Bean(destroyMethod = "close")
+    public ExecutorService virtualTaskExecutor() {
+        return Executors.newVirtualThreadPerTaskExecutor();
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Pool hoá virtual thread như platform thread
+
+- **Triệu chứng:** Tạo `ExecutorService` cố định vài chục virtual thread rồi tự hỏi vì sao concurrency không tăng.
+- **Nguyên nhân:** Virtual thread rẻ và được thiết kế dùng theo kiểu mỗi task một thread mới (`newVirtualThreadPerTaskExecutor`); pool hoá phá vỡ mô hình.
+- **Fix:** Không pool virtual thread; giới hạn concurrency bằng `Semaphore` ở đúng tài nguyên cần bảo vệ nếu cần.
+
+### 2. Bật virtual thread rồi bỏ qua giới hạn của connection pool
+
+- **Triệu chứng:** Hàng nghìn request cùng chờ lấy connection, timeout hàng loạt ở HikariCP trong khi CPU rảnh.
+- **Nguyên nhân:** Thread không còn là nút thắt nên toàn bộ áp lực dồn xuống pool và database.
+- **Fix:** Đo và tune pool theo khả năng thật của database (xem bài HikariCP ở Module 03), thêm bulkhead/timeout rõ ràng ở client.
+
+### 3. Pinning lặng lẽ do synchronized quanh I/O
+
+- **Triệu chứng:** Tăng tải tới một ngưỡng là throughput đứng yên, carrier thread luôn bận dù đa số request đang chờ.
+- **Nguyên nhân:** Virtual thread block trong monitor `synchronized` không unmount được khỏi carrier.
+- **Fix:** Bật ghi nhận event `jdk.VirtualThreadPinned` khi chẩn đoán, thay `synchronized` bằng `ReentrantLock` ở code tự quản lý, nâng cấp thư viện gây pinning.
+
+### 4. Dùng virtual thread cho tác vụ CPU-bound nặng
+
+- **Triệu chứng:** Latency toàn hệ thống xấu đi khi chạy tác vụ tính toán nặng trên virtual thread không giới hạn.
+- **Nguyên nhân:** Virtual thread không tạo thêm năng lực CPU; hàng nghìn task tính toán tranh nhau số core ít ỏi.
+- **Fix:** Giữ executor có giới hạn theo số core cho CPU-bound; chỉ dùng virtual thread cho I/O-bound.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay (viết, vẽ sơ đồ, đọc code) — không có chấm tự động.
+
+1. **Vẽ sơ đồ:** Vẽ mô hình 6 virtual thread chạy trên 2 carrier thread qua 3 thời điểm: tất cả đang chạy, một thread block chờ DB, thread đó I/O xong và được mount lại.
+2. **Đọc code trả lời:** Đọc `LegacyTokenCache` ở mục Code: nếu thay `ReentrantLock` bằng `synchronized` trên method thì điều gì thay đổi khi `loader.get()` chờ I/O lâu? Carrier thread bị ảnh hưởng thế nào?
+3. **Viết tay quyết định:** Cho 3 workload — gọi CRM đồng bộ số dư, render báo cáo tính toán nặng trên CPU, ghi log audit chờ DB — quyết định workload nào dùng virtual thread, workload nào không, kèm lý do.
+4. **Viết code:** Viết một đoạn dùng `Executors.newVirtualThreadPerTaskExecutor` chạy 3 task tra cứu độc lập và gom kết quả, kèm `Semaphore` giới hạn tối đa 20 task chạy đồng thời xuống một downstream.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- JEP 444 — Virtual Threads: https://openjdk.org/jeps/444
+- Dev.java — Virtual Threads: https://dev.java/learn/new-features/virtual-threads/
+- Spring Boot — Virtual Threads: https://docs.spring.io/spring-boot/reference/features/spring-application.html
+- Spring Framework — Threading và scheduling: https://docs.spring.io/spring-framework/reference/integration/scheduling.html
+
+## Đọc thêm
+
+Không có.

@@ -1,0 +1,203 @@
+---
+title: "Testing trong Spring Boot: slice tests và MockMvc"
+module: 2
+level: "Middle"
+duration: 50
+order: 4
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Spring Data JPA 3.3.x", "Hibernate 6.5.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Phân biệt được `@SpringBootTest`, `@WebMvcTest`, `@DataJpaTest` về phạm vi context, tốc độ và loại lỗi mà mỗi loại bắt được.
+- Viết được một slice test cho tầng web bằng `MockMvc` và một slice test cho tầng JPA, thay thế phụ thuộc bằng `@MockBean` đúng chỗ.
+- Thiết kế được bộ test hình tháp cân đối cho một service: nhiều unit test, đủ slice test, ít test toàn context.
+
+## Vì sao cần biết
+
+Nova Loyalty có logic rất đắt nếu sai: cộng điểm hai lần, trừ điểm khi không đủ số dư, ghi outbox thiếu sự kiện. Bộ test là lưới an toàn duy nhất cho phép team refactor các phần này với nhịp nhanh. Nhưng một bộ test toàn `@SpringBootTest` cho mọi thứ sẽ chậm tới mức không ai chạy trước khi commit, còn một bộ toàn unit test với mọi thứ bị mock sẽ xanh ngay cả khi cấu hình thật sai — ví dụ mapping JPA lệch hoặc route gateway không khớp. Slice test là tầng giữa quyết định: nạp đúng lát của context cần kiểm chứng (chỉ web, chỉ JPA) với tốc độ gần unit test nhưng bắt được lỗi tích hợp ngay trong lát đó. Đây là kỹ năng phân tầng test mà mọi service Java/Spring trong team đều dùng hằng ngày.
+
+## Nội dung chính
+
+### Ba mức kiểm chứng, ba loại lỗi khác nhau
+
+- Unit test thuần: không container, nhanh nhất, kiểm chứng logic của một class với phụ thuộc được thay bằng bản giả do ta kiểm soát.
+- Slice test: container nạp một lát giới hạn. `@WebMvcTest` chỉ nạp tầng web (controller, filter, converter, cấu hình MVC) và tự thay các bean service bằng mock nếu ta khai báo. `@DataJpaTest` chỉ nạp tầng JPA, chạy mỗi test trong transaction và rollback ở cuối, mặc định dùng database nhúng thay thế trừ khi được cấu hình khác.
+- `@SpringBootTest`: nạp toàn bộ context như lúc chạy thật, dùng cho test tích hợp đầu-cuối của các luồng chính và kiểm tra cấu hình tổng thể. Đắt nhất nên ít nhất.
+
+Chọn mức test theo câu hỏi "lỗi mình muốn bắt sống ở đâu", không theo thói quen.
+
+### MockMvc: kiểm chứng tầng web không cần server thật
+
+`MockMvc` cho phép gửi request mô phỏng qua toàn bộ chuỗi xử lý MVC — gồm filter, interceptor, argument resolver, validation, exception handler — và khẳng định trên status, header, body JSON bằng `jsonPath`. Với `@WebMvcTest`, các bean ngoài tầng web không được nạp; service mà controller cần phải được cung cấp bằng `@MockBean` (Boot 3 dùng annotation này từ spring-boot-test; lưu ý tên gọi ở các bản mới có thể thay đổi theo dòng Spring Test, hãy đối chiếu tài liệu của đúng bản đang dùng khi nâng cấp lớn).
+
+Điểm hay bị quên: security filter cũng thuộc tầng web. Test controller mà không tính tới cấu hình bảo mật sẽ hoặc thất bại bất ngờ, hoặc tệ hơn là xanh trong test nhưng hành vi production khác hẳn. Hãy cấu hình test security một cách có ý thức.
+
+### DataJpaTest: mapping và query là đối tượng kiểm chứng
+
+`@DataJpaTest` kiểm chứng đúng những thứ unit test không chạm tới: mapping entity có đúng với schema, query dẫn xuất và `@Query` có chạy thật, ràng buộc duy nhất cho `idempotencyKey` có hiệu lực. Mặc định test dùng database nhúng thay cho datasource cấu hình; với các tính năng đặc thù của PostgreSQL, cần thay bằng database thật qua Testcontainers (bài tiếp theo) thay vì tin rằng nhúng và thật hành xử giống nhau.
+
+<Mermaid chart={`flowchart TD
+  A["Unit test - nhiều nhất, nhanh nhất"] --> B["Slice test - WebMvcTest, DataJpaTest"]
+  B --> C["SpringBootTest toàn context - ít nhất"]
+  A -.-> D["Logic một class"]
+  B -.-> E["Tích hợp trong một lát"]
+  C -.-> F["Luồng đầu cuối và cấu hình tổng thể"]`} label="Tháp test cho service Nova Loyalty: số lượng giảm dần theo độ rộng tích hợp của từng tầng." />
+
+### Tính xác định và dữ liệu test
+
+Test tốt phải xác định (deterministic): không phụ thuộc thứ tự chạy, thời gian thực, hay dữ liệu sót của test trước. Các nguyên tắc: mỗi test tự chuẩn bị dữ liệu của nó, tận dụng rollback của slice JPA, cố định đồng hồ khi logic phụ thuộc thời gian như hết hạn điểm, và tránh ngủ chờ (`sleep`) làm điều kiện đồng bộ trong test bất đồng bộ.
+
+## Code
+
+Cần các dependency `spring-boot-starter-test` và `spring-boot-starter-validation` trong `pom.xml` (phạm vi test cho starter test).
+
+Slice test tầng web cho controller điểm, mock service bằng `@MockBean`:
+
+```java filename=PointsControllerTest.java
+package com.nova.loyalty.points;
+
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.MockMvc;
+
+@WebMvcTest(PointsController.class)
+class PointsControllerTest {
+
+    @Autowired
+    private MockMvc mockMvc;
+
+    @MockBean
+    private PointsAccountService accountService;
+
+    @Test
+    void changePointsReturnsNewBalance() throws Exception {
+        when(accountService.changePoints(42L, 100L, "key-1")).thenReturn(1_250L);
+
+        mockMvc.perform(post("/v4/gs/points/42/change")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"memberId\":42,\"delta\":100,\"idempotencyKey\":\"key-1\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.memberId").value(42))
+                .andExpect(jsonPath("$.balanceAfter").value(1250));
+    }
+
+    @Test
+    void changePointsRejectsZeroDelta() throws Exception {
+        mockMvc.perform(post("/v4/gs/points/42/change")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"memberId\":42,\"delta\":0,\"idempotencyKey\":\"key-2\"}"))
+                .andExpect(status().isBadRequest());
+    }
+}
+```
+
+Slice test tầng JPA cho repository ví điểm và ràng buộc duy nhất của khoá idempotency:
+
+```java filename=PointsWalletRepositoryTest.java
+package com.nova.loyalty.points;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.dao.DataIntegrityViolationException;
+
+@DataJpaTest
+class PointsWalletRepositoryTest {
+
+    @Autowired
+    private PointsWalletRepository walletRepository;
+
+    @Autowired
+    private ProcessedChangeRepository processedChangeRepository;
+
+    @Test
+    void savesAndFindsWalletByMemberId() {
+        walletRepository.save(new PointsWallet(42L, 500L));
+
+        assertThat(walletRepository.findByMemberId(42L))
+                .isPresent()
+                .get()
+                .extracting(PointsWallet::getBalance)
+                .isEqualTo(500L);
+    }
+
+    @Test
+    void duplicateIdempotencyKeyViolatesUniqueConstraint() {
+        processedChangeRepository.saveAndFlush(new ProcessedChange("key-dup"));
+        assertThatThrownBy(() ->
+                processedChangeRepository.saveAndFlush(new ProcessedChange("key-dup")))
+                .isInstanceOf(DataIntegrityViolationException.class);
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Mọi test đều là SpringBootTest toàn context
+
+- **Triệu chứng:** Bộ test chạy hàng phút, lập trình viên bỏ qua việc chạy test trước khi commit.
+- **Nguyên nhân:** Dùng mức tích hợp rộng nhất cho cả những lỗi chỉ cần unit/slice test là bắt được.
+- **Fix:** Hạ tầng test xuống đúng mức cần thiết theo tháp test; chỉ giữ `@SpringBootTest` cho luồng đầu-cuối chính và kiểm tra cấu hình tổng thể.
+
+### 2. Mock luôn cả đối tượng đang cần kiểm chứng
+
+- **Triệu chứng:** Test xanh nhưng tính năng vẫn sai ở production vì mọi phụ thuộc đều là mock trả giá trị định sẵn.
+- **Nguyên nhân:** Nhầm giữa đối tượng cần kiểm chứng và phụ thuộc cần cô lập.
+- **Fix:** Chỉ mock phụ thuộc nằm ngoài lát đang kiểm chứng; thành phần thuộc lát phải là bản thật.
+
+### 3. Quên rằng security thuộc tầng web trong WebMvcTest
+
+- **Triệu chứng:** Test trả 401/403 không mong muốn, hoặc team tắt toàn bộ bảo mật trong test rồi không phát hiện lỗi cấu hình thật.
+- **Nguyên nhân:** Filter chain được nạp cùng lát web; test không cấu hình người dùng test và kỳ vọng rõ ràng.
+- **Fix:** Cấu hình test security tường minh, có cả test cho trường hợp không được phép truy cập.
+
+### 4. Tin database nhúng thay thế hoàn hảo cho PostgreSQL
+
+- **Triệu chứng:** `@DataJpaTest` xanh với database nhúng nhưng query lỗi hoặc hành vi khác hẳn trên PostgreSQL production.
+- **Nguyên nhân:** Khác biệt dialect, kiểu dữ liệu và tính năng đặc thù của từng database.
+- **Fix:** Giữ test nhúng cho logic cơ bản; bài toán đặc thù PostgreSQL kiểm chứng bằng Testcontainers với image thật.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay (viết, vẽ sơ đồ, đọc code) — không có chấm tự động.
+
+1. **Viết code:** Viết một `@WebMvcTest` cho endpoint truy vấn số dư, gồm test thành công và test trường hợp ví không tồn tại trả 404.
+2. **Viết code:** Viết một `@DataJpaTest` kiểm chứng một query dẫn xuất theo hai tiêu chí và một ràng buộc duy nhất tự chọn.
+3. **Đọc code trả lời:** Đọc `PointsControllerTest` ở mục Code: nếu bỏ `@MockBean` cho service thì context của slice test thất bại thế nào, và vì sao?
+4. **Viết tay thiết kế:** Phác tháp test cho một service đổi quà gồm: liệt kê 6 unit test, 4 slice test, 2 test toàn context mà bạn sẽ viết, mỗi mục ghi rõ loại lỗi nó bắt.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Boot — Testing: https://docs.spring.io/spring-boot/reference/testing/index.html
+- Spring Boot — Slice Tests và Auto-configured Tests: https://docs.spring.io/spring-boot/reference/testing/spring-boot-applications.html
+- Spring Framework — MockMvc: https://docs.spring.io/spring-framework/reference/testing/mockmvc.html
+- Spring Data JPA — Testing Repositories: https://docs.spring.io/spring-data/jpa/reference/repositories/core-concepts.html
+
+## Đọc thêm
+
+Không có.

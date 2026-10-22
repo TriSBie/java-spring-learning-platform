@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Cấu hình CORS với origin cụ thể, không dùng wildcard khi có credentials.",
+    "Bật được CORS trong SecurityFilterChain để preflight không bị chặn 401.",
+    "Giải thích được preflight OPTIONS và khi nào trình duyệt gửi nó.",
+    "Nêu được vì sao API thuần bearer token có thể tắt CSRF có cơ sở.",
+    "Nhận diện được trường hợp tắt CSRF là sai: API vẫn chấp nhận cookie.",
+    "Phân biệt được đánh đổi bảo mật giữa cookie-based auth và header bearer token."
+  ],
+  "quiz": [
+    {
+      "answerIndex": 0,
+      "explanation": "CORS là thỏa thuận giữa trình duyệt và máy chủ về việc JS khác origin có được đọc response hay không; client không phải trình duyệt không bị CORS ràng buộc.",
+      "options": [
+        "Cơ chế của trình duyệt, máy chủ cho biết origin nào được đọc response",
+        "Cách load balancer chọn backend",
+        "Một cơ chế mã hóa dữ liệu trên đường truyền",
+        "Một loại token chống CSRF"
+      ],
+      "question": "CORS chủ yếu bảo vệ điều gì?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Header tùy biến như Authorization khiến request không còn là simple request, trình duyệt phải hỏi trước bằng preflight OPTIONS.",
+      "options": [
+        "Khi method là GET đơn giản không header tùy biến",
+        "Chỉ khi response là JSON",
+        "Khi cookie sắp hết hạn",
+        "Khi request có header tùy biến như Authorization hoặc method không đơn giản"
+      ],
+      "question": "Khi nào trình duyệt gửi preflight request?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Đặc tả cấm kết hợp wildcard origin với credentials vì nó cho mọi trang web đọc response mang danh tính nạn nhân.",
+      "options": [
+        "Vì trình duyệt sẽ cache vĩnh viễn cấu hình đó",
+        "Vì máy chủ không parse được dấu sao",
+        "Vì mọi origin đều được đọc response mang credential của nạn nhân",
+        "Vì wildcard làm chậm preflight"
+      ],
+      "question": "Vì sao không được dùng wildcard origin kèm allowCredentials?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "CSRF dựa trên việc cookie được trình duyệt tự đính kèm; token trong header thì phải do client chủ động thêm, trang độc hại không có token đó.",
+      "options": [
+        "Vì trình duyệt không tự đính kèm header Authorization, còn cookie thì tự được gửi kèm",
+        "Vì JWT không bao giờ hết hạn",
+        "Vì CSRF chỉ tấn công được database",
+        "Vì trình duyệt chặn mọi request khác origin"
+      ],
+      "question": "Vì sao API thuần bearer token trong header thường không bị CSRF kinh điển?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Khi cookie được chấp nhận làm xác thực, bề mặt CSRF quay lại đầy đủ; phải bật CSRF token hoặc cơ chế tương đương cho phần đó.",
+      "options": [
+        "Không sao vì đã có CORS",
+        "Tắt luôn xác thực cookie là lỗi bảo mật khác",
+        "Chỉ cần đổi tên cookie",
+        "Phải bật lại cơ chế CSRF token cho phần dùng cookie hoặc tách bề mặt xác thực"
+      ],
+      "question": "Nếu cùng API cũng chấp nhận session cookie, quyết định tắt CSRF sẽ thế nào?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Security filter chạy trước MVC; nếu CORS không được bật trong chain, preflight chết ở tầng filter trước khi tới controller.",
+      "options": [
+        "Vì preflight dùng giao thức khác",
+        "Vì preflight bị filter bảo mật xử lý trước controller, nên CORS phải bật trong SecurityFilterChain",
+        "Vì gateway luôn xóa header Origin",
+        "Vì annotation CORS chỉ áp dụng cho GET"
+      ],
+      "question": "Vì sao phải bật CORS trong SecurityFilterChain thay vì chỉ gắn ở controller?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Máy chủ cần cho phép đúng origin, method và các header mà client sẽ gửi, nếu không trình duyệt chặn request thật.",
+      "options": [
+        "Phiên bản TLS của trình duyệt",
+        "Origin, method và header được phép như Authorization và Content-Type",
+        "Chỉ địa chỉ IP của client",
+        "Kích thước tối đa của request body"
+      ],
+      "question": "Preflight response cần khẳng định những gì để request thật được gửi?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "maxAge cho trình duyệt cache kết quả preflight trong khoảng thời gian đó, giảm số lần hỏi lại cho các request tương tự.",
+      "options": [
+        "Thời gian session cookie tồn tại",
+        "Thời gian sống của JWT",
+        "Thời gian trình duyệt cache kết quả preflight",
+        "Thời gian máy chủ giữ kết nối TCP"
+      ],
+      "question": "Thuộc tính maxAge trong CORS để làm gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Cookie cần HttpOnly, Secure, SameSite để giảm XSS/CSRF; bearer token do JS quản lý thì rủi ro chính là XSS đọc được token.",
+      "options": [
+        "Cookie an toàn hơn vì trình duyệt tự gửi",
+        "Cookie có bề mặt CSRF và cần thuộc tính bảo vệ riêng; token do JS giữ có rủi ro chính là bị đọc khi có XSS",
+        "Cookie và token trong header có rủi ro giống hệt nhau",
+        "Token trong header luôn an toàn tuyệt đối"
+      ],
+      "question": "Đánh đổi đúng giữa cookie auth và bearer token trong header là gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "CORS không phải tường lửa cho máy chủ; client ngoài trình duyệt vẫn gọi được API, việc bảo vệ thật nằm ở xác thực và phân quyền.",
+      "options": [
+        "Thay thế hoàn toàn cho JWT",
+        "Chặn mọi client không phải trình duyệt",
+        "Không, CORS chỉ điều tiết trình duyệt, bảo vệ thật vẫn là xác thực và phân quyền ở máy chủ",
+        "Mã hóa toàn bộ traffic"
+      ],
+      "question": "CORS có ngăn được công cụ dòng lệnh gọi API của bạn không?"
+    }
+  ]
+}

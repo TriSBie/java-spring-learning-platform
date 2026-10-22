@@ -1,0 +1,123 @@
+{
+  "checklist": [
+    "Dùng Optional đúng cho kiểu trả về và tránh dùng cho field, tham số, phần tử collection.",
+    "Thay được get() không kiểm tra bằng orElseThrow, orElseGet hoặc ifPresentOrElse phù hợp ngữ cảnh.",
+    "Giải thích được quan hệ happens-before bằng ít nhất ba cơ chế thiết lập nó.",
+    "Phân biệt được đảm bảo của volatile với tính nguyên tử của thao tác đọc-sửa-ghi.",
+    "Mô tả được safe publication và vai trò của final field trong khởi tạo an toàn.",
+    "Nhận diện được data race khi review một đoạn code chia sẻ trạng thái.",
+    "Đề xuất được cách sửa bằng bất biến, AtomicReference hoặc cấu trúc concurrent phù hợp."
+  ],
+  "quiz": [
+    {
+      "answerIndex": 0,
+      "explanation": "Optional được thiết kế chủ yếu làm kiểu trả về thể hiện kết quả có thể vắng mặt, ép caller xử lý trường hợp rỗng ngay tại điểm gọi.",
+      "options": [
+        "Kiểu trả về thể hiện kết quả có thể vắng mặt",
+        "Field của entity",
+        "Tham số của mọi method",
+        "Phần tử bắt buộc trong collection"
+      ],
+      "question": "Optional được thiết kế chủ yếu cho vị trí nào?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "get() khi rỗng ném NoSuchElementException và bỏ qua hoàn toàn việc ép xử lý trường hợp vắng mặt, mất lợi ích chính của Optional.",
+      "options": [
+        "Nó chậm hơn orElse",
+        "Nó tự trả về null",
+        "Nó ném NoSuchElementException khi rỗng mà không ép caller xử lý trường hợp vắng mặt",
+        "Nó không tồn tại trong Java 21"
+      ],
+      "question": "Vì sao gọi get() trên Optional mà không kiểm tra là anti-pattern?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "orElseGet chỉ gọi supplier khi Optional rỗng, tránh tốn chi phí tạo giá trị thay thế không cần thiết như orElse.",
+      "options": [
+        "orElse",
+        "orElseGet",
+        "get",
+        "ofNullable"
+      ],
+      "question": "Khi giá trị thay thế tốn kém để tạo, nên dùng method nào của Optional?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Happens-before là quan hệ thứ tự do JMM định nghĩa: nếu hành động A happens-before B thì kết quả của A được đảm bảo nhìn thấy bởi B.",
+      "options": [
+        "Thứ tự dòng code trong file nguồn",
+        "Quan hệ đảm bảo một hành động của thread này được nhìn thấy bởi hành động của thread khác theo đặc tả JMM",
+        "Thứ tự thực thi vật lý trên CPU",
+        "Ưu tiên của thread"
+      ],
+      "question": "Quan hệ happens-before trong Java Memory Model có nghĩa là gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Ghi volatile happens-before mọi lần đọc cùng biến đó sau đó; unlock một monitor happens-before lock cùng monitor tiếp theo. Cả hai đều thiết lập happens-before.",
+      "options": [
+        "Chỉ ghi volatile",
+        "Chỉ unlock rồi lock cùng một monitor",
+        "Cả ghi volatile và cặp unlock/lock cùng monitor đều thiết lập happens-before",
+        "Không cơ chế nào trong các lựa chọn trên"
+      ],
+      "question": "Cơ chế nào sau đây thiết lập quan hệ happens-before?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "volatile đảm bảo visibility và thứ tự quanh biến đó, nhưng đọc-sửa-ghi là ba bước tách rời, vẫn có thể chen nhau. Cần AtomicLong hoặc khoá.",
+      "options": [
+        "Có, volatile làm mọi thao tác đều nguyên tử",
+        "Không, volatile chỉ đảm bảo visibility và thứ tự; thao tác tăng vẫn là đọc-sửa-ghi không nguyên tử",
+        "Có, nếu biến là long",
+        "Không, vì long không dùng được volatile"
+      ],
+      "question": "Một biến volatile long được tăng bằng toán tử ++ từ nhiều thread có an toàn không?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Safe publication là đưa reference tới thread khác qua cơ chế có happens-before: volatile, AtomicReference, khoá, collection concurrent, hoặc khởi tạo static an toàn.",
+      "options": [
+        "Gán reference vào một field thường bất kỳ",
+        "Đưa reference qua volatile, AtomicReference, khoá hoặc collection concurrent để có happens-before",
+        "Chỉ cần object đã khởi tạo xong",
+        "In reference ra log"
+      ],
+      "question": "Safe publication của một object cho thread khác đòi hỏi điều gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "JMM đảm bảo final field của object khởi tạo đúng cách được nhìn thấy đúng bởi thread khác khi object được publication an toàn; điều kiện là constructor không để this thoát ra ngoài.",
+      "options": [
+        "final field không bao giờ được đọc bởi thread khác",
+        "final field luôn tự đồng bộ mọi object",
+        "final field được đảm bảo nhìn thấy đúng sau safe publication nếu constructor không để this thoát ra ngoài",
+        "final field thay thế được volatile trong mọi trường hợp"
+      ],
+      "question": "Đảm bảo của final field trong JMM là gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Data race là hai truy cập đồng thời cùng một biến, ít nhất một là ghi, và không có happens-before giữa chúng.",
+      "options": [
+        "Hai thread cùng đọc một biến final",
+        "Hai truy cập đồng thời vào cùng biến, ít nhất một là ghi, không có happens-before giữa chúng",
+        "Một thread ghi hai biến khác nhau",
+        "Hai thread dùng hai biến khác nhau"
+      ],
+      "question": "Data race được định nghĩa như thế nào?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Collection rỗng đã thể hiện không có phần tử; thêm Optional chỉ làm API khó dùng và dễ xuất hiện Optional field bị null.",
+      "options": [
+        "Vì List không chứa được Optional",
+        "Vì Optional không serialize được trong List",
+        "Vì compiler cấm điều đó",
+        "Vì collection rỗng đã thể hiện ý nghĩa không có phần tử, bọc thêm Optional chỉ làm API khó dùng"
+      ],
+      "question": "Vì sao không nên bọc một collection vào trong Optional?"
+    }
+  ]
+}

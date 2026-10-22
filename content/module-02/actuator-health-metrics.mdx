@@ -1,0 +1,203 @@
+---
+title: "Actuator: health, metrics và Micrometer cơ bản"
+module: 2
+level: "Middle"
+duration: 40
+order: 3
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Micrometer 1.13.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Bật và giới hạn được các endpoint của Actuator theo nguyên tắc chỉ lộ những gì vận hành cần, bảo vệ phần còn lại.
+- Cấu hình được health group cho liveness và readiness tách biệt, hiểu đúng ý nghĩa của từng trạng thái sức khoẻ.
+- Đọc và tạo được metric cơ bản qua Micrometer: counter, timer, gauge, và gắn tag có kiểm soát số lượng giá trị (cardinality).
+
+## Vì sao cần biết
+
+Nova Loyalty chạy dạng pod sau load balancer, và có một consumer đồng bộ CRM với ngân sách draining 75 giây khi nhận tín hiệu dừng. Cả hai sự thật vận hành này đều phụ thuộc vào Actuator: orchestrator quyết định pod còn sống hay cần khởi động lại dựa trên liveness, quyết định có đưa traffic vào pod hay không dựa trên readiness, và hệ thống giám sát cạo (scrape) metric từ endpoint metrics/Prometheus để vẽ dashboard và bắn cảnh báo. Cấu hình health sai một chiều — ví dụ để một datasource phụ như `report` làm readiness chuyển DOWN — sẽ rút toàn bộ pod khỏi traffic chỉ vì một thành phần không thiết yếu đang hỏng. Hiểu Actuator không phải là phần phụ: nó là giao diện giữa ứng dụng và toàn bộ hệ thống vận hành xung quanh.
+
+## Nội dung chính
+
+### Endpoint mặc định và nguyên tắc phơi bày
+
+Actuator cung cấp các endpoint như `health`, `info`, `metrics`, `env`, `loggers`. Chỉ `health` và `info` được phơi qua HTTP theo mặc định; các endpoint nhạy cảm khác phải bật có chủ đích bằng cấu hình exposure. Nguyên tắc vận hành:
+
+- Chỉ phơi endpoint mà công cụ vận hành thật sự dùng.
+- Endpoint chi tiết như `env`, heap dump, thread dump không bao giờ phơi công khai; chúng chứa thông tin nhạy cảm.
+- Health ở môi trường production thường chỉ trả trạng thái tổng, chi tiết thành phần chỉ dành cho hệ thống nội bộ được uỷ quyền.
+
+### Health indicator và health group
+
+Mỗi thành phần (datasource, disk, broker) đóng góp một `HealthIndicator`. Boot tự đóng góp indicator cho các thành phần nó biết; ta có thể viết indicator riêng cho phụ thuộc nghiệp vụ như CRM. Health group gom các indicator thành các góc nhìn khác nhau:
+
+- Nhóm liveness chỉ trả lời "process còn sống và không kẹt chết" — không nên phụ thuộc vào hệ thống ngoài, vì liveness DOWN khiến orchestrator khởi động lại pod, và khởi động lại không chữa được lỗi của hệ thống ngoài.
+- Nhóm readiness trả lời "pod đã sẵn sàng nhận traffic chưa" — bao gồm các kiểm tra cần thiết để phục vụ, ví dụ kết nối được datasource chính.
+- Trạng thái tổng hợp theo mức nghiêm trọng nhất trong nhóm, và có thể tuỳ biến ánh xạ trạng thái sang mã HTTP.
+
+Sai lầm kinh điển là dùng chung một nhóm cho cả hai mục đích, khiến một phụ thuộc ngoài chập chờn vừa rút traffic vừa khởi động lại pod liên tục.
+
+### Micrometer: facade metric phía trên hệ giám sát
+
+Micrometer là thư viện đo lường mà Boot dùng làm mặt tiền (facade): code ứng dụng ghi metric qua Micrometer, hệ thống phía sau có thể là Prometheus hoặc các hệ tương thích mà không đổi code. Ba loại metric nền tảng:
+
+- `Counter`: chỉ tăng, cho số sự kiện tích luỹ như số giao dịch điểm thành công.
+- `Timer`: đo thời lượng kèm số lần, cho latency của lời gọi hoặc xử lý một message.
+- `Gauge`: giá trị tức thời có thể lên xuống, như số connection đang dùng của một pool.
+
+Metric kèm tag (dimension) để cắt lát, ví dụ theo `wallet_source`. Tag có số giá trị phân biệt cao — như `memberId` — sẽ nổ tổ hợp chuỗi thời gian ở hệ giám sát và bị cấm trong thực hành đúng; đây gọi là vấn đề cardinality.
+
+<Mermaid chart={`flowchart LR
+  A["Probe của orchestrator"] --> B["Health group liveness"]
+  A --> C["Health group readiness"]
+  D["Hệ giám sát"] --> E["Endpoint metrics Prometheus"]
+  E --> F["Micrometer registry"]
+  F --> G["Counter, Timer, Gauge của ứng dụng"]`} label="Actuator là giao diện vận hành của pod Nova Loyalty: probe đọc health group, hệ giám sát cạo metric qua Micrometer." />
+
+### Availability state và graceful shutdown
+
+Boot quản lý trạng thái availability nội bộ gồm liveness và readiness state, và health group mặc định bám theo các trạng thái này. Khi ứng dụng bắt đầu graceful shutdown, readiness chuyển sang từ chối traffic trước khi các thành phần khác dừng — đây là mắt xích nối Actuator với hành vi draining của consumer và của web server mà các module sau khai thác.
+
+## Code
+
+Cần dependency `spring-boot-starter-actuator` trong `pom.xml`; thêm registry Prometheus bằng dependency `micrometer-registry-prometheus` khi cần endpoint scrape.
+
+Cấu hình phơi endpoint có kiểm soát và health group tách biệt:
+
+```properties filename=application.properties
+management.endpoints.web.exposure.include=health,info,metrics,prometheus
+management.endpoint.health.show-details=when-authorized
+management.endpoint.health.group.liveness.include=livenessState
+management.endpoint.health.group.readiness.include=readinessState,db
+management.health.db.enabled=true
+management.metrics.tags.application=nova-loyalty
+```
+
+Health indicator riêng cho CRM, đóng góp trạng thái DOWN khi CRM không reachable trong kiểm tra nhẹ:
+
+```java filename=CrmHealthIndicator.java
+package com.nova.loyalty.health;
+
+import org.springframework.boot.actuate.health.Health;
+import org.springframework.boot.actuate.health.HealthIndicator;
+import org.springframework.stereotype.Component;
+
+@Component
+public class CrmHealthIndicator implements HealthIndicator {
+
+    private final CrmPingClient crmPingClient;
+
+    public CrmHealthIndicator(CrmPingClient crmPingClient) {
+        this.crmPingClient = crmPingClient;
+    }
+
+    @Override
+    public Health health() {
+        boolean reachable = crmPingClient.ping();
+        if (reachable) {
+            return Health.up().withDetail("crm", "reachable").build();
+        }
+        return Health.down().withDetail("crm", "unreachable").build();
+    }
+}
+```
+
+Ghi metric nghiệp vụ bằng `MeterRegistry` và timer qua `Timer.Sample` cho đoạn xử lý không có annotation hỗ trợ trực tiếp:
+
+```java filename=PointsMetrics.java
+package com.nova.loyalty.points;
+
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import java.util.function.Supplier;
+import org.springframework.stereotype.Component;
+
+@Component
+public class PointsMetrics {
+
+    private final MeterRegistry registry;
+
+    public PointsMetrics(MeterRegistry registry) {
+        this.registry = registry;
+    }
+
+    public void recordChange(String walletSource, boolean success) {
+        Counter.builder("nova.points.change")
+                .tag("wallet_source", walletSource)
+                .tag("result", success ? "success" : "failure")
+                .register(registry)
+                .increment();
+    }
+
+    public <T> T timeSync(String target, Supplier<T> work) {
+        Timer.Sample sample = Timer.start(registry);
+        try {
+            return work.get();
+        } finally {
+            sample.stop(Timer.builder("nova.crm.sync.duration")
+                    .tag("target", target)
+                    .register(registry));
+        }
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Phơi mọi endpoint Actuator ra ngoài
+
+- **Triệu chứng:** Endpoint môi trường và heap dump truy cập được từ ngoài phạm vi vận hành.
+- **Nguyên nhân:** Đặt exposure là dấu sao cho tiện trong lúc phát triển rồi mang nguyên lên production.
+- **Fix:** Chỉ liệt kê tường minh các endpoint vận hành cần, bảo vệ endpoint quản trị bằng mạng nội bộ và phân quyền.
+
+### 2. Để phụ thuộc ngoài quyết định liveness
+
+- **Triệu chứng:** Pod bị khởi động lại theo vòng lặp khi một hệ thống ngoài như CRM hoặc datasource phụ hỏng.
+- **Nguyên nhân:** Health group liveness gộp cả indicator của phụ thuộc ngoài; khởi động lại pod không chữa được lỗi bên ngoài.
+- **Fix:** Liveness chỉ gồm trạng thái sống nội bộ của process; phụ thuộc ngoài thuộc về readiness hoặc cảnh báo, không thuộc liveness.
+
+### 3. Gắn tag có cardinality cao lên metric
+
+- **Triệu chứng:** Hệ giám sát phình số chuỗi thời gian, chi phí lưu trữ và thời gian truy vấn tăng vọt.
+- **Nguyên nhân:** Dùng tag như `memberId` hoặc id giao dịch, vốn có số giá trị gần như vô hạn.
+- **Fix:** Chỉ gắn tag có tập giá trị nhỏ và biết trước như nguồn ví, loại giao dịch, kết quả thành công/thất bại.
+
+### 4. Health check thực hiện thao tác nặng
+
+- **Triệu chứng:** Mỗi lần probe là một query đắt hoặc một lời gọi đồng bộ đầy đủ xuống hệ thống ngoài, tự tạo tải lên thành phần đang yếu.
+- **Nguyên nhân:** Health indicator viết như một kiểm tra nghiệp vụ đầy đủ thay vì kiểm tra nhẹ.
+- **Fix:** Indicator chỉ làm kiểm tra kết nối nhẹ, có timeout ngắn, và cân nhắc cache kết quả trong khoảng rất ngắn khi hệ thống ngoài nhạy cảm với tần suất gọi.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay (viết, vẽ sơ đồ, đọc code) — không có chấm tự động.
+
+1. **Viết code:** Viết một `HealthIndicator` cho một hàng đợi nội bộ tưởng tượng, trả UP khi hàng đợi hoạt động và OUT_OF_SERVICE khi đang draining, kèm detail có ích cho vận hành.
+2. **Vẽ sơ đồ:** Vẽ bản đồ endpoint Actuator của một pod Nova Loyalty: endpoint nào orchestrator dùng, endpoint nào hệ giám sát dùng, endpoint nào cấm phơi ra ngoài, ghi lý do cho từng nhóm.
+3. **Đọc code trả lời:** Đọc `PointsMetrics` ở mục Code: vì sao tag `result` và `wallet_source` chấp nhận được còn tag `memberId` thì không? Điều gì xảy ra ở hệ giám sát nếu gắn tag `memberId` trong một tháng?
+4. **Viết tay quyết định:** Cho 5 thành phần — datasource core, datasource report, CRM, Kafka, disk — quyết định thành phần nào thuộc liveness, thành phần nào thuộc readiness, thành phần nào không thuộc cả hai, kèm lý do.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Boot — Actuator: https://docs.spring.io/spring-boot/reference/actuator/index.html
+- Spring Boot — Health Indicators: https://docs.spring.io/spring-boot/reference/actuator/endpoints.html
+- Micrometer — Concepts: https://docs.micrometer.io/micrometer/reference/concepts.html
+- Spring Boot — Metrics: https://docs.spring.io/spring-boot/reference/actuator/metrics.html
+
+## Đọc thêm
+
+Không có.

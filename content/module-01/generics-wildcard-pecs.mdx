@@ -1,0 +1,189 @@
+---
+title: "Generics, wildcard và nguyên tắc PECS"
+module: 1
+level: "Middle"
+duration: 45
+order: 5
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Spring Data JPA 3.3.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Giải thích được type erasure và hệ quả của nó: không tạo được mảng generic, không dùng `instanceof` với kiểu tham số hoá cụ thể, thông tin generic chủ yếu tồn tại lúc biên dịch.
+- Áp dụng đúng nguyên tắc PECS khi chọn `? extends T` cho nguồn chỉ đọc và `? super T` cho đích chỉ ghi trong chữ ký method.
+- Viết được helper generic cho repository và cho xử lý phân trang/batch mà không dùng raw type và không cần cast thủ công.
+
+## Vì sao cần biết
+
+Codebase Nova Loyalty có nhiều helper dùng chung: nạp một danh sách id thành từng batch để query vào 5 datasource, chuyển đổi danh sách entity sang DTO, ghi một lô sự kiện vào outbox. Nếu các helper này viết bằng raw type hoặc `List<Object>`, mọi lỗi kiểu dữ liệu bị đẩy xuống runtime dưới dạng `ClassCastException` ở những nơi xa lạ, rất khó truy vết trong log production. Nếu viết generic nhưng chọn sai chiều wildcard — ví dụ tham số nguồn là `List<Dog>` không truyền được vào `List<Animal>` — lập trình viên sẽ "chữa cháy" bằng cast và xoá mất lợi ích của generics. Hiểu PECS và type erasure là điều kiện để viết thư viện nội bộ an toàn kiểu mà cả team dùng được lâu dài.
+
+## Nội dung chính
+
+### Invariance: List của subtype không phải subtype của List
+
+Generics trong Java là invariant: `List<Integer>` không phải là subtype của `List<Number>`, dù `Integer` là subtype của `Number`. Lý do là nếu cho phép, một `List<Number>` có thể bị thêm vào một `Double` trong khi thực chất nó là `List<Integer>`, phá vỡ an toàn kiểu. Wildcard là cơ chế nới lỏng có kiểm soát sự cứng nhắc này, ở đúng chiều an toàn.
+
+### PECS: Producer Extends, Consumer Super
+
+Nguyên tắc PECS (từ Effective Java, khớp với cách JDK thiết kế API) tóm gọn việc chọn wildcard:
+
+- Tham số đóng vai trò producer — chỉ lấy dữ liệu ra để đọc: dùng `? extends T`. Từ một `List<? extends Number>` ta đọc được phần tử dưới dạng `Number`, nhưng không được thêm phần tử cụ thể nào vào (ngoại trừ `null`), vì compiler không biết kiểu thật.
+- Tham số đóng vai trò consumer — chỉ nhận dữ liệu vào để ghi: dùng `? super T`. Vào một `List<? super Integer>` ta ghi được `Integer` (và subtype của nó), nhưng khi đọc ra chỉ biết chắc là `Object`.
+- Tham số vừa đọc vừa ghi cùng kiểu: dùng kiểu chính xác `T`, không wildcard.
+
+Nhớ PECS giúp chữ ký method linh hoạt tối đa mà không đánh đổi an toàn kiểu.
+
+### Type erasure và những giới hạn bắt buộc phải biết
+
+Để tương thích ngược với bytecode cũ, compiler xoá thông tin generic sau khi kiểm tra kiểu (type erasure): `List<String>` và `List<Integer>` cùng trở thành `List` ở runtime, type variable bị thay bằng bound của nó. Hệ quả thực tế:
+
+- Không viết được `new T()`, `new T[]`, và không dùng được `instanceof List<String>`.
+- Overload chỉ khác nhau ở tham số generic là xung đột sau erasure.
+- Thông tin generic trên chữ ký method/field vẫn còn trong metadata, và đó là cách Spring đọc được kiểu thật của repository hay của kiểu trả về — qua reflection trên chữ ký khai báo, không phải trên instance.
+- Cảnh báo unchecked thường là dấu hiệu code đang đi vòng qua kiểm tra kiểu; đừng dập cảnh báo một cách máy móc.
+
+<Mermaid chart={`flowchart TD
+  A["Cần truyền collection vào method"] --> B{"Method đọc ra hay ghi vào?"}
+  B -->|"Chỉ đọc - producer"| C["Dung ? extends T"]
+  B -->|"Chỉ ghi - consumer"| D["Dung ? super T"]
+  B -->|"Vừa đọc vừa ghi"| E["Dung T chính xác"]`} label="Cây quyết định PECS: chọn chiều wildcard theo vai trò producer/consumer của tham số." />
+
+### Bounded type parameter và helper dùng chung
+
+Khi tự định nghĩa method/class generic, bound `T extends Comparable<T>` hoặc `T extends Number` giới hạn tập kiểu được phép và cho phép gọi method của bound mà không cần cast. Kết hợp bound với wildcard ở điểm gọi tạo thành API vừa chặt vừa linh hoạt — đúng mô hình của Spring Data, nơi `JpaRepository<T, ID>` khoá entity type và id type ngay từ khai báo interface.
+
+## Code
+
+Helper generic cho xử lý batch và chuyển đổi danh sách, áp dụng PECS ở cả hai chiều:
+
+```java filename=BatchSupport.java
+package com.nova.loyalty.common;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.Function;
+
+public final class BatchSupport {
+
+    private BatchSupport() {
+    }
+
+    public static <T> List<List<T>> partition(List<? extends T> source, int batchSize) {
+        if (batchSize <= 0) {
+            throw new IllegalArgumentException("batchSize must be positive");
+        }
+        List<List<T>> batches = new ArrayList<>();
+        for (int i = 0; i < source.size(); i += batchSize) {
+            int end = Math.min(i + batchSize, source.size());
+            batches.add(List.copyOf(source.subList(i, end)));
+        }
+        return List.copyOf(batches);
+    }
+
+    public static <S, D> void convertInto(
+            List<? extends S> source,
+            Function<? super S, ? extends D> mapper,
+            List<? super D> destination) {
+        for (S item : source) {
+            destination.add(mapper.apply(item));
+        }
+    }
+
+    public static double sum(List<? extends Number> numbers) {
+        double total = 0.0d;
+        for (Number number : numbers) {
+            total += number.doubleValue();
+        }
+        return total;
+    }
+}
+```
+
+Repository helper kiểu Spring Data, khoá kiểu entity và id ngay tại khai báo, tránh cast ở nơi sử dụng:
+
+```java filename=EntityLookup.java
+package com.nova.loyalty.common;
+
+import java.util.List;
+import java.util.Optional;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface EntityLookup {
+
+    static <T, ID> T requireById(JpaRepository<T, ID> repository, ID id) {
+        Optional<T> found = repository.findById(id);
+        return found.orElseThrow(() ->
+                new IllegalArgumentException("Entity not found for id " + id));
+    }
+
+    static <T, ID> List<T> findAllExisting(JpaRepository<T, ID> repository, List<ID> ids) {
+        List<T> entities = repository.findAllById(ids);
+        if (entities.size() != ids.size()) {
+            throw new IllegalArgumentException(
+                    "Expected " + ids.size() + " entities but found " + entities.size());
+        }
+        return entities;
+    }
+}
+```
+
+Cần dependency `spring-boot-starter-data-jpa` trong `pom.xml` cho `JpaRepository` ở snippet thứ hai.
+
+## Sai lầm thường gặp
+
+### 1. Dùng raw type cho nhanh
+
+- **Triệu chứng:** Cảnh báo raw type khắp nơi, lỗi `ClassCastException` xuất hiện ở code cách xa nguyên nhân thật.
+- **Nguyên nhân:** Raw type tắt toàn bộ kiểm tra kiểu của compiler cho biến đó và cả các thành viên liên quan.
+- **Fix:** Luôn tham số hoá đầy đủ; nếu thật sự không biết kiểu, dùng wildcard `?` chứ không dùng raw type.
+
+### 2. Chọn ngược chiều wildcard
+
+- **Triệu chứng:** `List<PointsEarned>` không truyền được vào method xử lý `List<PointsEvent>`, hoặc method ghi bị compiler từ chối phần tử hợp lệ.
+- **Nguyên nhân:** Tham số nguồn đọc lại khai là `? super`, hoặc đích ghi lại khai là `? extends`.
+- **Fix:** Áp dụng PECS: producer dùng `extends`, consumer dùng `super`.
+
+### 3. Cố thêm phần tử vào List có extends wildcard
+
+- **Triệu chứng:** Compiler từ chối `add` vào một `List<? extends Number>` dù phần tử là `Integer`.
+- **Nguyên nhân:** Compiler không biết kiểu thật phía sau wildcard; thêm bất kỳ kiểu cụ thể nào cũng có thể sai với list thật.
+- **Fix:** Nếu method cần ghi, đổi chữ ký sang `? super T` hoặc kiểu chính xác `T`; nếu chỉ đọc, thiết kế lại để không ghi.
+
+### 4. Kiểm tra instanceof với kiểu tham số hoá cụ thể
+
+- **Triệu chứng:** Code kiểm tra kiểu generic lúc runtime không biên dịch được hoặc phải cast unchecked.
+- **Nguyên nhân:** Type erasure xoá thông tin generic trên instance; runtime chỉ còn raw type.
+- **Fix:** Truyền `Class<T>` token vào method khi cần kiểm tra/tạo instance lúc runtime, như cách nhiều framework vẫn làm.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay (viết, vẽ sơ đồ, đọc code) — không có chấm tự động.
+
+1. **Viết code:** Viết method `copy` sao chép mọi phần tử từ một list nguồn sang một list đích với chữ ký dùng đúng cả `extends` lẫn `super`, rồi gọi nó với nguồn `List<PointsEarned>` và đích `List<PointsEvent>`.
+2. **Đọc code trả lời:** Đọc `convertInto` ở mục Code và giải thích vai trò producer/consumer của từng tham số trong chữ ký của nó.
+3. **Viết tay phân tích:** Liệt kê 3 việc không làm được do type erasure, mỗi việc kèm một cách vòng (workaround) mà JDK hoặc Spring sử dụng.
+4. **Vẽ sơ đồ:** Vẽ quan hệ subtype giữa `List<Integer>`, `List<Number>`, `List<? extends Number>` và `List<? super Integer>`, đánh dấu cặp nào gán được cho nhau.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Dev.java — Generics: https://dev.java/learn/generics/
+- Dev.java — Wildcards: https://dev.java/learn/generics/wildcards/
+- Spring Data JPA — Repositories: https://docs.spring.io/spring-data/jpa/reference/repositories/core-concepts.html
+- Spring Framework — Generics và ResolvableType: https://docs.spring.io/spring-framework/reference/core/beans/context-introduction.html
+
+## Đọc thêm
+
+Không có.

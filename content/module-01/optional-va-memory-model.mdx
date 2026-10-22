@@ -1,0 +1,189 @@
+---
+title: "Optional anti-patterns và Java Memory Model"
+module: 1
+level: "Senior"
+duration: 55
+order: 6
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Dùng `Optional` đúng chỗ: kiểu trả về cho phép vắng mặt, và tránh dùng `Optional` cho field, tham số, hoặc phần tử của collection.
+- Giải thích được quan hệ happens-before, vai trò của `volatile`, `final` field và safe publication đối với object được chia sẻ giữa các thread.
+- Phân tích được một đoạn code chia sẻ trạng thái có data race và đề xuất cách sửa bằng bất biến, đồng bộ hoá, hoặc cấu trúc dữ liệu concurrent phù hợp.
+
+## Vì sao cần biết
+
+Nova Loyalty xử lý đồng thời rất cao: nhiều pod, nhiều thread cập nhật ví điểm bằng CAS và `idempotencyKey`. Hai nhóm lỗi nguy hiểm nhất ở tầng này đều vô hình trong test đơn thread. Nhóm thứ nhất là `Optional` dùng sai: repository trả `Optional`, service lại gọi `get()` bừa bãi hoặc lồng `Optional` trong `Optional`, khiến `NullPointerException` được thay bằng `NoSuchElementException` và API trở nên khó dùng mà không an toàn hơn. Nhóm thứ hai nghiêm trọng hơn: một cấu hình làm mới token cho legacy service Java 11, hoặc một cache trạng thái draining của consumer, được publication không an toàn giữa các thread — thread này nhìn thấy object mới nhưng với field chưa được khởi tạo xong. Hiểu Java Memory Model (JMM) ở mức happens-before là điều kiện để review được loại code này thay vì chỉ "thấy chạy được".
+
+## Nội dung chính
+
+### Optional: thiết kế cho kiểu trả về, không phải cho mọi nơi
+
+`Optional` được thiết kế chủ yếu làm kiểu trả về thể hiện "có thể không có kết quả", buộc caller xử lý trường hợp vắng mặt ngay tại điểm gọi. Các anti-pattern cần tránh:
+
+- Dùng `Optional` làm field của entity/DTO: làm hỏng serialization, tăng chi phí, và field vẫn có thể null nếu không khởi tạo.
+- Dùng `Optional` làm tham số method: caller bị ép bọc giá trị, trong khi overload hoặc quy ước null rõ ràng sẽ đơn giản hơn.
+- Gọi `get()` mà không kiểm tra: thay một exception rõ nghĩa bằng `NoSuchElementException` khó hiểu.
+- Lồng `Optional` trong `Optional`, hoặc bọc cả collection: collection rỗng đã thể hiện "không có" một cách tự nhiên.
+- Dùng `Optional` để thay thế ngoại lệ nghiệp vụ có mang thông tin lỗi cần cho caller xử lý khác nhau.
+
+Cách dùng đúng: `map`, `flatMap`, `filter`, `orElseGet` cho giá trị thay thế tốn kém, `orElseThrow` kèm exception có nghĩa nghiệp vụ, và `ifPresentOrElse` khi cần hành động ở cả hai nhánh.
+
+### Vì sao code đa luồng "trông đúng" vẫn có thể sai
+
+JMM định nghĩa khi nào một ghi của thread này được đảm bảo nhìn thấy bởi thread khác. Không có quan hệ happens-before, JVM và CPU được phép sắp xếp lại thứ tự lệnh và giữ giá trị trong cache/register riêng của mỗi core. Hệ quả là code đọc một biến dùng chung mà không có cơ chế đồng bộ nào có thể đọc giá trị cũ vô hạn định, hoặc đọc một object mới được publication nhưng field của nó còn chưa được ghi xong.
+
+Happens-before được thiết lập bởi, trong số các cơ chế khác: mở khoá (unlock) một monitor happens-before mọi lần khoá (lock) cùng monitor sau đó; ghi một biến `volatile` happens-before mọi lần đọc biến đó sau đó; `Thread.start` và `Thread.join`; và các thao tác trên cấu trúc concurrent của `java.util.concurrent` theo đặc tả của chúng.
+
+### volatile, final và safe publication
+
+- `volatile` đảm bảo visibility và thứ tự quanh biến đó, nhưng không làm tổ hợp thao tác đọc-sửa-ghi trở nên nguyên tử: `volatile long` vẫn race khi dùng toán tử tăng.
+- `final` field của một object được khởi tạo đúng cách (constructor không để `this` thoát ra ngoài) được JMM đảm bảo các thread khác nhìn thấy đúng giá trị sau khi object được publication an toàn.
+- Safe publication là việc đưa reference của object tới thread khác qua một cơ chế có happens-before: biến `volatile`, `AtomicReference`, khoá, collection concurrent, hoặc khởi tạo static an toàn.
+
+Gộp lại, pattern an toàn nhất cho trạng thái chia sẻ vẫn là bất biến: object chỉ chứa `final` field, được tạo hoàn chỉnh rồi publication qua `volatile`/`AtomicReference`. Trạng thái draining của consumer Nova (đang chạy hay đang draining) là ví dụ điển hình nên dùng mô hình này thay vì các field mutable rời rạc.
+
+<Mermaid chart={`flowchart LR
+  A["Thread ghi: tạo object hoàn chỉnh"] --> B["Ghi vào biến volatile - happens-before"]
+  B --> C["Thread đọc: đọc biến volatile"]
+  C --> D["Nhìn thấy toàn bộ field final đã khởi tạo"]`} label="Safe publication qua volatile: quan hệ happens-before đảm bảo thread đọc thấy object hoàn chỉnh, không phải bản đang xây dở." />
+
+### Data race, race condition và cách review
+
+Data race là hai truy cập đồng thời vào cùng một biến mà ít nhất một là ghi và không có happens-before giữa chúng. Race condition rộng hơn: kết quả phụ thuộc vào thứ tự thực thi không kiểm soát, kể cả khi từng biến riêng lẻ đều `volatile`. Khi review, hãy lần theo ba câu hỏi cho mỗi trạng thái dùng chung: ai ghi, ai đọc, cơ chế nào thiết lập happens-before giữa ghi và đọc đó. Không trả lời được câu thứ ba là tìm thấy một lỗi tiềm ẩn, dù test có xanh.
+
+## Code
+
+Refactor một holder cấu hình dùng chung: từ field mutable không an toàn sang object bất biến publication qua `volatile`. Snippet chỉ cần JDK 21:
+
+```java filename=CrmTokenHolder.java
+package com.nova.loyalty.crm;
+
+import java.time.Instant;
+import java.util.Objects;
+
+public final class CrmTokenHolder {
+
+    public record CrmToken(String value, Instant expiresAt) {
+        public CrmToken {
+            Objects.requireNonNull(value, "value must not be null");
+            Objects.requireNonNull(expiresAt, "expiresAt must not be null");
+        }
+
+        public boolean isExpired(Instant now) {
+            return !expiresAt.isAfter(now);
+        }
+    }
+
+    private volatile CrmToken current;
+
+    public CrmTokenHolder(CrmToken initial) {
+        this.current = Objects.requireNonNull(initial, "initial token must not be null");
+    }
+
+    public CrmToken current() {
+        return current;
+    }
+
+    public void refresh(CrmToken next) {
+        this.current = Objects.requireNonNull(next, "next token must not be null");
+    }
+}
+```
+
+Dùng `Optional` đúng cách ở tầng service, với repository của Spring Data:
+
+```java filename=MemberLookupService.java
+package com.nova.loyalty.member;
+
+import java.util.Optional;
+import org.springframework.stereotype.Service;
+
+@Service
+public class MemberLookupService {
+
+    private final MemberRepository memberRepository;
+
+    public MemberLookupService(MemberRepository memberRepository) {
+        this.memberRepository = memberRepository;
+    }
+
+    public MemberView requireMember(Long memberId) {
+        return memberRepository.findById(memberId)
+                .map(MemberView::from)
+                .orElseThrow(() -> new MemberNotFoundException(memberId));
+    }
+
+    public Optional<String> displayNameOf(Long memberId) {
+        return memberRepository.findById(memberId)
+                .map(Member::displayName)
+                .filter(name -> !name.isBlank());
+    }
+
+    public String greetingFor(Long memberId) {
+        return displayNameOf(memberId).orElseGet(() -> "Member " + memberId);
+    }
+}
+```
+
+Cần dependency `spring-boot-starter-data-jpa` trong `pom.xml` cho repository mà `MemberLookupService` sử dụng.
+
+## Sai lầm thường gặp
+
+### 1. Gọi get trên Optional không kiểm tra
+
+- **Triệu chứng:** `NoSuchElementException` trong production ở những dòng tưởng như đã "xử lý null bằng Optional".
+- **Nguyên nhân:** Dùng `get()` rút gọn làm mất hoàn toàn lợi ích ép xử lý trường hợp vắng mặt của `Optional`.
+- **Fix:** Dùng `orElseThrow` với exception nghiệp vụ, hoặc `map`/`ifPresentOrElse` để xử lý cả hai nhánh tường minh.
+
+### 2. Dùng Optional cho field và tham số
+
+- **Triệu chứng:** DTO/entity cồng kềnh, lỗi serialization, và field `Optional` vẫn null khi object được tạo bằng đường khác.
+- **Nguyên nhân:** `Optional` sinh ra cho kiểu trả về; dùng ở field/tham số làm API khó dùng mà không tăng an toàn.
+- **Fix:** Field giữ kiểu thường và invariant rõ ràng; tham số dùng overload hoặc quy ước tài liệu hoá; chỉ kiểu trả về mới bọc `Optional`.
+
+### 3. Đánh dấu volatile rồi tưởng thao tác tăng là nguyên tử
+
+- **Triệu chứng:** Bộ đếm dùng chung thỉnh thoảng mất lượt tăng khi tải cao.
+- **Nguyên nhân:** `volatile` chỉ đảm bảo visibility và thứ tự, thao tác đọc-sửa-ghi vẫn là ba bước tách rời có thể chen nhau.
+- **Fix:** Dùng `AtomicLong`/`LongAdder` cho bộ đếm, hoặc khoá cho tổ hợp thao tác phức tạp hơn.
+
+### 4. Publication object mutable qua field thường
+
+- **Triệu chứng:** Thread khác thỉnh thoảng thấy object mới nhưng field bên trong còn giá trị mặc định, lỗi không tái hiện được ổn định.
+- **Nguyên nhân:** Không có happens-before giữa việc ghi các field trong constructor và việc thread khác đọc reference.
+- **Fix:** Object bất biến với `final` field, publication qua `volatile`, `AtomicReference` hoặc collection concurrent.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay (viết, vẽ sơ đồ, đọc code) — không có chấm tự động.
+
+1. **Đọc code trả lời:** Đọc `CrmTokenHolder` ở mục Code: vì sao `CrmToken` được thiết kế là record bất biến thay vì class có setter, và `volatile` ở field `current` đảm bảo điều gì cho thread đọc?
+2. **Viết tay phân tích:** Vẽ timeline hai thread cho đoạn mã dùng chung một biến `boolean ready` thường và một field dữ liệu thường: ghi dữ liệu, ghi `ready = true`, thread kia đọc `ready` rồi đọc dữ liệu. Chỉ ra hai kết quả sai có thể xảy ra và cơ chế sửa cho từng kết quả.
+3. **Viết code:** Viết lại một method trả `Optional` đang gọi `get()` ở ba nơi trong service thành các cách xử lý tường minh khác nhau: `orElseThrow`, `orElseGet`, `ifPresentOrElse`.
+4. **Viết tay review:** Liệt kê toàn bộ trạng thái dùng chung giữa các thread trong một consumer Kafka bạn hình dung, và với mỗi trạng thái ghi rõ cơ chế thiết lập happens-before đang được dùng hoặc đang thiếu.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Dev.java — Stream API và Optional trong thực hành: https://dev.java/learn/api/collections-and-streams/streams/
+- Spring Data JPA — Query Methods và Optional: https://docs.spring.io/spring-data/commons/reference/repositories/query-methods.html
+- Spring Framework — Transaction và threading: https://docs.spring.io/spring-framework/reference/data-access/transaction.html
+
+## Đọc thêm
+
+Không có.

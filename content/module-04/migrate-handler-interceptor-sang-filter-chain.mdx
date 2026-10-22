@@ -1,0 +1,204 @@
+---
+title: "Migrate từ HandlerInterceptor sang SecurityFilterChain"
+module: 4
+level: "Senior"
+duration: 60
+order: 5
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Spring Security 6.3.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Lập được kế hoạch migrate từng bước từ cơ chế xác thực bằng `HandlerInterceptor` và custom annotation trên nền Java 11 sang `SecurityFilterChain` trên Java 21 / Spring Security 6.
+- Thiết kế được giai đoạn dual-run an toàn: hai cơ chế chạy song song, so sánh kết quả, và cắt chuyển theo từng nhóm route có kiểm soát.
+- Liệt kê được các rủi ro đặc thù của migration bảo mật (sai thứ tự filter, mất ngữ cảnh danh tính, lệch ánh xạ role) và cách giảm thiểu từng rủi ro.
+
+## Vì sao cần biết
+
+Nova Loyalty không chỉ có các service Java 21 mới. Trong hệ thống còn một service legacy chạy Java 11, nơi việc xác thực và phân quyền được cài đặt bằng `HandlerInterceptor` kết hợp một custom annotation gắn trên handler method: interceptor đọc token, kiểm tra annotation, rồi tự quyết định cho qua hay chặn. Cách làm này từng đủ dùng, nhưng nó nằm ngoài filter chain chuẩn: không có `SecurityContext` thống nhất, không dùng được method security hiện đại, thứ tự chạy so với các filter khác rất khó suy luận, và mọi service lại tự chế một biến thể riêng. Khi Nova chuẩn hóa lên Spring Security 6, service legacy là điểm rủi ro lớn nhất nếu migrate ẩu — một lỗi ánh xạ role có thể mở quyền quản trị cho toàn bộ khách hàng.
+
+## Nội dung chính
+
+### Khác biệt kiến trúc cốt lõi
+
+Hai cơ chế khác nhau ở vị trí và mô hình:
+
+- `HandlerInterceptor` chạy trong tầng Spring MVC, sau khi request đã qua toàn bộ servlet filter, và chỉ chạy khi request tới được một handler. Nó biết handler method và annotation trên đó, nhưng nằm ngoài vòng đời bảo mật chuẩn.
+- `SecurityFilterChain` chạy ở tầng servlet filter, rất sớm, trước khi request vào MVC. Nó xây dựng `SecurityContext` để mọi tầng phía sau (gồm cả method security) dùng chung một nguồn danh tính duy nhất.
+
+Hệ quả thực tế: chuyển từ interceptor sang filter chain không phải đổi tên class, mà là chuyển nơi ra quyết định bảo mật từ tầng MVC xuống tầng filter, và chuyển ngữ nghĩa từ annotation tự chế sang rule và authority chuẩn.
+
+### Bước 1: Lập bản đồ hành vi hiện tại
+
+Trước khi viết dòng code mới nào, hãy kiểm kê toàn bộ hành vi của cơ chế cũ:
+
+- Custom annotation có những thuộc tính nào (role yêu cầu, quyền yêu cầu, cho phép anonymous) và chúng xuất hiện trên bao nhiêu handler.
+- Interceptor đọc danh tính từ đâu (header nào, định dạng token gì), xử lý token hết hạn và token thiếu ra sao (mã HTTP nào).
+- Những path nào hiện đang được interceptor bỏ qua hoàn toàn.
+
+Bảng kiểm kê này trở thành đặc tả hành vi (behavior spec) để viết test đối chứng trước khi migrate.
+
+### Bước 2: Viết test đối chứng
+
+Với mỗi nhóm route đại diện, viết test ghi lại hành vi hiện tại theo ma trận: không token, token hết hạn, token đúng role, token sai role, path được bỏ qua. Sau migration, cùng bộ test đó phải cho kết quả tương đương, chỉ khác ở nơi không tương đương là chủ đích đã được ghi rõ.
+
+Đây là lưới an toàn duy nhất đáng tin cho migration bảo mật, vì lỗi phân quyền hiếm khi gây crash — chúng gây mở quyền âm thầm.
+
+### Bước 3: Dựng filter chain mới ở chế độ shadow
+
+Dựng `SecurityFilterChain` mới cho service, ánh xạ từng thuộc tính của custom annotation thành authority chuẩn: role thành `ROLE_...`, quyền thành authority nguyên văn. Trong giai đoạn shadow, chain mới xác thực và ghi log quyết định của nó, nhưng quyết định chặn hay cho qua cuối cùng vẫn do interceptor cũ quyết định. So sánh log hai phía trên traffic thật (đã ẩn danh token) để tìm lệch.
+
+<Mermaid chart={`flowchart TD
+  A[Lap ban do hanh vi interceptor cu] --> B[Viet test doi chung theo ma tran token/role]
+  B --> C[Dung SecurityFilterChain moi o che do shadow]
+  C --> D[So sanh quyet dinh hai co che tren traffic that]
+  D --> E{Con lech khong giai thich duoc}
+  E -->|Con| C
+  E -->|Het| F[Cat chuyen tung nhom route sang chain moi]
+  F --> G[Go interceptor va annotation cu]
+`} label="Lộ trình migrate: kiểm kê, test đối chứng, shadow, so sánh, cắt chuyển theo nhóm route, rồi mới gỡ cơ chế cũ." />
+
+### Bước 4: Cắt chuyển theo nhóm route
+
+Đừng cắt toàn bộ trong một lần deploy. Sắp xếp route theo mức rủi ro tăng dần: route đọc công khai trước, route nghiệp vụ thường tiếp theo, route quản trị và giao dịch điểm cuối cùng. Mỗi đợt cắt chuyển cần:
+
+- Tiêu chí rollback rõ ràng (lệch tỷ lệ 401/403 vượt ngưỡng, log đối chứng xuất hiện lệch mới).
+- Thời gian quan sát sau cắt trước khi sang nhóm tiếp theo.
+- Một công tắc cấu hình để quay lại cơ chế cũ cho riêng nhóm route đó nếu cần.
+
+### Rủi ro đặc thù cần quản trị
+
+- Lệch ánh xạ role: tiền tố role ở cơ chế cũ và cơ chế mới khác nhau khiến `hasRole` cho kết quả ngược kỳ vọng.
+- Mất ngữ cảnh ở endpoint ngoài MVC: interceptor chỉ chạy với handler MVC, còn filter chain chạy cho cả static resource, error dispatch và actuator — hành vi ở các bề mặt này sẽ thay đổi và phải được quyết định có chủ đích.
+- Thứ tự so với filter khác: CORS, logging và filter đọc `X-Forwarded-For` phải giữ vị trí đúng trong chain mới, đặc biệt khi service chạy sau gateway.
+- Nâng cấp đồng thời Java 11 lên 21 và namespace cũ sang `jakarta.*`: gộp quá nhiều thay đổi vào một đợt làm việc truy vết lỗi gần như không thể; tách nâng runtime và migrate bảo mật thành hai đợt riêng, mỗi đợt có test đối chứng riêng.
+
+> [!WARNING] Cần verify với docs version Spring Security 6.3.x: chi tiết ánh xạ authority mặc định của JWT (claim và tiền tố) cùng hành vi của các filter mặc định có thể khác cấu hình tự chế đang chạy ở service legacy; đối chiếu tài liệu trước khi khóa bảng ánh xạ.
+
+## Code
+
+Ví dụ dưới đây là hình dạng đích của migration: filter chain chuẩn, authority được ánh xạ nhất quán, và một adapter mỏng giữ tương thích cho các handler còn dùng custom annotation trong thời gian chuyển đổi. Lưu ý adapter này chỉ là cầu nối tạm thời, không phải thiết kế cuối cùng.
+
+```java filename=MigratedSecurityConfig.java
+package com.nova.loyalty.legacy.security;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.Customizer;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.web.SecurityFilterChain;
+
+@Configuration
+@EnableWebSecurity
+@EnableMethodSecurity
+public class MigratedSecurityConfig {
+
+    @Bean
+    public SecurityFilterChain migratedChain(HttpSecurity http) throws Exception {
+        http
+            .securityMatcher("/v4/**")
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/v4/gs/public/**").permitAll()
+                .requestMatchers("/v4/os/admin/**").hasRole("OPS_ADMIN")
+                .requestMatchers("/v4/gs/wallets/**").hasAnyRole("CUSTOMER", "OPS_ADMIN")
+                .anyRequest().authenticated())
+            .oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()))
+            .csrf(csrf -> csrf.disable())
+            .sessionManagement(session -> session
+                .sessionCreationPolicy(SessionCreationPolicy.STATELESS));
+        return http.build();
+    }
+}
+```
+
+Bảng ánh xạ thuộc tính annotation cũ sang authority chuẩn nên được giữ ngay trong code dưới dạng một component có test riêng:
+
+```java filename=LegacyAuthorityMapper.java
+package com.nova.loyalty.legacy.security;
+
+import java.util.List;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.stereotype.Component;
+
+@Component
+public class LegacyAuthorityMapper {
+
+    public List<SimpleGrantedAuthority> mapRoles(List<String> legacyRoles) {
+        if (legacyRoles == null) {
+            return List.of();
+        }
+        return legacyRoles.stream()
+                .map(String::trim)
+                .filter(role -> !role.isEmpty())
+                .map(role -> role.startsWith("ROLE_") ? role : "ROLE_" + role)
+                .map(SimpleGrantedAuthority::new)
+                .toList();
+    }
+
+    public List<SimpleGrantedAuthority> mapPermissions(List<String> legacyPermissions) {
+        if (legacyPermissions == null) {
+            return List.of();
+        }
+        return legacyPermissions.stream()
+                .map(String::trim)
+                .filter(permission -> !permission.isEmpty())
+                .map(SimpleGrantedAuthority::new)
+                .toList();
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Big-bang migration trong một lần deploy
+
+- **Triệu chứng:** Sau một đêm cắt chuyển, hàng loạt route trả 403 oan hoặc, nguy hiểm hơn, một nhóm route quản trị bị mở mà chỉ phát hiện khi audit.
+- **Nguyên nhân:** Thay toàn bộ cơ chế bảo mật cùng lúc, không shadow, không test đối chứng, không cắt theo nhóm route.
+- **Fix:** Đi theo lộ trình kiểm kê, test đối chứng, shadow so sánh, cắt từng nhóm route theo mức rủi ro tăng dần với tiêu chí rollback rõ ràng.
+
+### 2. Lệch tiền tố role khi ánh xạ
+
+- **Triệu chứng:** Người dùng đúng role vẫn bị 403, hoặc rule `hasRole` khớp với cả những token lẽ ra không được phép.
+- **Nguyên nhân:** Cơ chế cũ lưu role không tiền tố, cơ chế mới kỳ vọng authority dạng `ROLE_...` (hoặc ngược lại), và không có bảng ánh xạ được test.
+- **Fix:** Khóa một bảng ánh xạ duy nhất, cài đặt trong một component riêng có unit test cho mọi role và permission hiện có trong kiểm kê.
+
+### 3. Gộp nâng cấp Java, namespace và bảo mật vào một đợt
+
+- **Triệu chứng:** Sau migration xuất hiện lỗi lạ nhưng không ai nói được lỗi thuộc về thay đổi runtime, thay đổi namespace hay thay đổi cơ chế bảo mật.
+- **Nguyên nhân:** Ba thay đổi lớn (Java 11 lên 21, namespace cũ sang `jakarta.*`, interceptor sang filter chain) được dồn vào một release.
+- **Fix:** Tách thành các đợt độc lập, mỗi đợt có bộ test đối chứng riêng và có thể rollback riêng.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được; trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay, không có chấm tự động.
+
+1. Lập mẫu bảng kiểm kê cho interceptor cũ của một service giả định: các thuộc tính của custom annotation, nguồn danh tính, mã lỗi cho từng trường hợp token, và các path được bỏ qua.
+2. Thiết kế ma trận test đối chứng gồm ít nhất tám ca (kết hợp loại token và nhóm route) và ghi kết quả kỳ vọng cho từng ca ở cả hai cơ chế.
+3. Viết kế hoạch cắt chuyển theo bốn đợt cho các nhóm route của Nova Loyalty, mỗi đợt ghi rõ tiêu chí quan sát và điều kiện rollback.
+4. Liệt kê năm rủi ro migration bạn cho là lớn nhất với service legacy của Nova và biện pháp giảm thiểu tương ứng cho từng rủi ro.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Security — Servlet Migrations và hướng dẫn nâng cấp: https://docs.spring.io/spring-security/reference/migration/index.html
+- Spring Security — Architecture: https://docs.spring.io/spring-security/reference/servlet/architecture.html
+- Spring Boot — Reference Documentation (nâng cấp và tương thích): https://docs.spring.io/spring-boot/reference/index.html
+
+## Đọc thêm
+
+Không có.

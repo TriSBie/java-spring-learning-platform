@@ -1,0 +1,240 @@
+---
+title: "Multi-datasource không JTA: kiến trúc của Nova Loyalty"
+module: 3
+level: "Senior"
+duration: 60
+order: 4
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Spring Data JPA 3.3.x", "Hibernate 6.5.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Thiết kế được một cụm multi-datasource không JTA: mỗi database có `DataSource`, `EntityManagerFactory` và `TransactionManager` riêng, repository được gắn đúng cụm.
+- Dùng đúng `@Transactional` với thuộc tính chỉ định transaction manager khi một service làm việc với nhiều database trong cùng một luồng nghiệp vụ.
+- Phân tích được đánh đổi nhất quán của mô hình không phân tán: không có atomic commit xuyên database, và các mẫu bù trừ như Outbox để đạt nhất quán cuối cùng.
+
+## Vì sao cần biết
+
+Đây là bài trung tâm của kiến trúc Nova Loyalty: hệ thống có 5 datasource HikariCP — core, gift, report, legacy, audit — và cố ý không dùng JTA. Quyết định này có nghĩa là không tồn tại một transaction nào bao được hai database: cộng điểm ở `core` và ghi nhận đổi quà ở `gift` là hai local transaction độc lập, một cái có thể commit trong khi cái còn lại rollback. Mọi service trong hệ đều sống trong thực tế đó. Ai không hiểu cấu trúc này sẽ viết code giả định tính nguyên tử xuyên database — dùng một `@Transactional` mặc định và tin rằng nó bao hết — để rồi sản xuất ra đúng loại lệch dữ liệu âm thầm mà Outbox và idempotency phải đi dọn. Hiểu rõ cách dựng từng cụm datasource, cách chỉ định transaction manager, và cách thiết kế nghiệp vụ chấp nhận nhất quán cuối cùng là năng lực Senior cốt lõi của nền tảng này.
+
+## Nội dung chính
+
+### Vì sao không JTA
+
+JTA/XA cung cấp atomic commit xuyên tài nguyên qua giao thức hai pha, đổi lại là độ phức tạp vận hành, độ trễ, và yêu cầu mọi tài nguyên đều hỗ trợ XA tốt. Nova Loyalty chọn không dùng vì ba lý do thực tế: phần lớn luồng nghiệp vụ chạm chính vào một database và chấp nhận được nhất quán cuối cùng cho phần còn lại; các hệ ngoài như Kafka và CRM vốn không tham gia XA của database được; và đội ngũ ưu tiên mô hình lỗi đơn giản, dễ suy luận của local transaction cộng thêm mẫu bù trừ tường minh. Cái giá phải trả là kỷ luật thiết kế: mọi luồng xuyên database đều phải trả lời được câu hỏi "nếu phía thứ hai thất bại sau khi phía thứ nhất đã commit thì sao".
+
+### Một cụm độc lập cho mỗi database
+
+Với mỗi database, cấu hình gồm một bộ ba riêng và một gói (package) riêng:
+
+- `DataSource` là pool HikariCP của riêng database đó.
+- `LocalContainerEntityManagerFactoryBean` trỏ tới đúng `DataSource` đó, quét đúng gói entity của database đó, mang cấu hình Hibernate riêng.
+- `JpaTransactionManager` gắn với đúng `EntityManagerFactory` đó.
+- Repository được gắn vào cụm bằng cấu hình repository riêng, khai báo đúng `entityManagerFactoryRef` và `transactionManagerRef`, đồng thời package của repository và entity phải tách bạch giữa các database để việc quét không lẫn.
+
+Auto-configuration của Boot chỉ tự dựng một cụm mặc định; khi tự khai báo các cụm riêng, ta đang tiếp quản cấu hình đó và phải khai báo đầy đủ, kể cả đánh dấu một cụm là chính (`@Primary`) cho các nơi dùng mặc định không chỉ định. Thiếu `@Primary` là nguồn lỗi "có nhiều bean cùng loại" kinh điển ở bước này.
+
+### Chỉ định transaction manager ở mỗi biên transaction
+
+`@Transactional` không có thuộc tính chỉ định sẽ dùng transaction manager mặc định/chính. Khi một method cần transaction trên database khác, phải nêu rõ manager tương ứng qua thuộc tính `transactionManager` (hoặc `value` theo tên bean). Hệ quả quan trọng: một lời gọi lồng nhau giữa hai service dùng hai manager khác nhau là hai transaction độc lập trên hai connection khác nhau — không có truyền bá (propagation) nào nối chúng thành một. Nếu method ngoài rollback, phần đã commit ở transaction trong không hề bị hoàn lại.
+
+<Mermaid chart={`flowchart TD
+  A["PointsService"] --> B["coreTransactionManager"]
+  A --> C["giftTransactionManager"]
+  B --> D["core EntityManagerFactory"]
+  C --> E["gift EntityManagerFactory"]
+  D --> F["core DataSource - HikariCP"]
+  E --> G["gift DataSource - HikariCP"]
+  F --> H["Database core"]
+  G --> I["Database gift"]`} label="Hai cụm datasource độc lập của Nova Loyalty: mỗi database một bộ ba DataSource, EntityManagerFactory, TransactionManager; không transaction nào bao cả hai." />
+
+### Thiết kế nghiệp vụ trên nền nhất quán cuối cùng
+
+Các mẫu thiết kế làm việc được trong mô hình này:
+
+- Thu hẹp biên atomic về một database: đặt dữ liệu phải nhất quán tuyệt đối với nhau vào cùng một database và cùng một local transaction.
+- Outbox cho nhu cầu lan truyền sang database/hệ khác: ghi sự kiện trong transaction gốc, chuyển tiếp bất đồng bộ, phía nhận idempotent.
+- Thao tác bù trừ (compensation) cho luồng nhiều bước kiểu Saga: mỗi bước có một hành động đảo ngược có nghĩa nghiệp vụ khi bước sau thất bại.
+- Khóa idempotency ở mỗi biên ghi: một yêu cầu được thử lại không bao giờ áp dụng hai lần, dù nó chạm vào bao nhiêu database.
+
+## Code
+
+Cần dependency `spring-boot-starter-data-jpa` trong `pom.xml`. Dưới đây là cụm `core` đầy đủ; các cụm còn lại dựng cùng mẫu trong các class cấu hình riêng.
+
+```java filename=CoreDataSourceConfig.java
+package com.nova.loyalty.config.core;
+
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+import java.util.Map;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.orm.jpa.EntityManagerFactoryBuilder;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
+import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+import org.springframework.orm.jpa.JpaTransactionManager;
+import org.springframework.orm.jpa.LocalContainerEntityManagerFactoryBean;
+import org.springframework.transaction.PlatformTransactionManager;
+
+@Configuration
+@EnableJpaRepositories(
+        basePackages = "com.nova.loyalty.core.repository",
+        entityManagerFactoryRef = "coreEntityManagerFactory",
+        transactionManagerRef = "coreTransactionManager")
+public class CoreDataSourceConfig {
+
+    @Bean
+    @Primary
+    public HikariDataSource coreDataSource() {
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl("jdbc:postgresql://core-db:5432/nova_core");
+        config.setUsername("nova_app");
+        config.setPassword(System.getenv("CORE_DB_PASSWORD"));
+        config.setPoolName("nova-core-pool");
+        config.setMaximumPoolSize(20);
+        config.setMinimumIdle(20);
+        return new HikariDataSource(config);
+    }
+
+    @Bean
+    @Primary
+    public LocalContainerEntityManagerFactoryBean coreEntityManagerFactory(
+            EntityManagerFactoryBuilder builder,
+            @Qualifier("coreDataSource") HikariDataSource dataSource) {
+        return builder
+                .dataSource(dataSource)
+                .packages("com.nova.loyalty.core.domain")
+                .persistenceUnit("core")
+                .properties(Map.of("hibernate.default_batch_fetch_size", "25"))
+                .build();
+    }
+
+    @Bean
+    @Primary
+    public PlatformTransactionManager coreTransactionManager(
+            @Qualifier("coreEntityManagerFactory") LocalContainerEntityManagerFactoryBean emf) {
+        return new JpaTransactionManager(java.util.Objects.requireNonNull(emf.getObject()));
+    }
+}
+```
+
+Service làm việc với hai database: ghi nhận đổi quà ở `gift` sau khi trừ điểm ở `core` đã commit, dùng Outbox và idempotency thay cho ảo tưởng atomic xuyên database:
+
+```java filename=RedemptionService.java
+package com.nova.loyalty.redemption;
+
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+@Service
+public class RedemptionService {
+
+    private final PointsDebitPort pointsDebitPort;
+    private final GiftRedemptionRecorder redemptionRecorder;
+
+    public RedemptionService(PointsDebitPort pointsDebitPort,
+                             GiftRedemptionRecorder redemptionRecorder) {
+        this.pointsDebitPort = pointsDebitPort;
+        this.redemptionRecorder = redemptionRecorder;
+    }
+
+    public void redeem(Long memberId, String giftId, long cost, String idempotencyKey) {
+        pointsDebitPort.debit(memberId, cost, idempotencyKey);
+        redemptionRecorder.record(memberId, giftId, cost, idempotencyKey);
+    }
+}
+```
+
+Bean ghi nhận đổi quà là một bean riêng — bắt buộc, vì lời gọi phải đi qua proxy của Spring thì `@Transactional` với manager của `gift` mới có hiệu lực (tự gọi nội bộ trong cùng class sẽ bỏ qua proxy):
+
+```java filename=GiftRedemptionRecorder.java
+package com.nova.loyalty.redemption;
+
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+@Service
+public class GiftRedemptionRecorder {
+
+    private final GiftRedemptionRepository redemptionRepository;
+    private final RedemptionOutboxWriter outboxWriter;
+
+    public GiftRedemptionRecorder(GiftRedemptionRepository redemptionRepository,
+                                  RedemptionOutboxWriter outboxWriter) {
+        this.redemptionRepository = redemptionRepository;
+        this.outboxWriter = outboxWriter;
+    }
+
+    @Transactional(transactionManager = "giftTransactionManager")
+    public void record(Long memberId, String giftId, long cost, String idempotencyKey) {
+        if (redemptionRepository.existsByIdempotencyKey(idempotencyKey)) {
+            return;
+        }
+        GiftRedemption redemption = new GiftRedemption(memberId, giftId, cost, idempotencyKey);
+        redemptionRepository.save(redemption);
+        outboxWriter.writeRedemptionRecorded(redemption);
+    }
+}
+```
+
+Trong đó `pointsDebitPort.debit` tự nó chạy trong `coreTransactionManager` ở phía port, và `RedemptionService.redeem` cố ý không mang `@Transactional` bao ngoài: không tồn tại transaction chung cho cả hai bước.
+
+## Sai lầm thường gặp
+
+### 1. Giả định một Transactional bao được nhiều database
+
+- **Triệu chứng:** Sau một sự cố giữa chừng, điểm đã trừ ở `core` nhưng bản ghi đổi quà ở `gift` không tồn tại, và không có cơ chế nào phát hiện.
+- **Nguyên nhân:** `@Transactional` mặc định chỉ gắn với một transaction manager và một database; phần ghi ở database còn lại nằm ngoài transaction đó.
+- **Fix:** Thiết kế lại theo nhất quán cuối cùng: Outbox, idempotency và thao tác bù trừ; ghi rõ biên atomic của từng bước trong tài liệu thiết kế.
+
+### 2. Quét chung package cho entity và repository của nhiều database
+
+- **Triệu chứng:** Lỗi khởi động vì entity được đăng ký vào cả hai persistence unit, hoặc repository nối vào sai `EntityManagerFactory`.
+- **Nguyên nhân:** Các cụm cấu hình quét chồng lấn cùng một gói, Hibernate và Spring Data không còn biết thứ gì thuộc về database nào.
+- **Fix:** Tách package riêng cho từng database ở cả entity và repository, khai báo tường minh các `Ref` trong từng cấu hình repository.
+
+### 3. Quên đánh dấu Primary cho cụm chính
+
+- **Triệu chứng:** Lỗi mơ hồ khi inject `DataSource`/`TransactionManager` không chỉ định, dù mọi cụm đều khai báo đúng.
+- **Nguyên nhân:** Khi có nhiều bean cùng loại, các điểm dùng mặc định cần một bean được đánh dấu chính để phân giải.
+- **Fix:** Đánh dấu `@Primary` cho đúng một cụm mặc định, và ở mọi nơi không dùng cụm mặc định thì chỉ định rõ bằng tên hoặc qualifier.
+
+### 4. Gọi method Transactional trong cùng class để đổi manager
+
+- **Triệu chứng:** Method được gọi nội bộ chạy bằng transaction của caller thay vì manager đã khai báo trên nó.
+- **Nguyên nhân:** Tự gọi nội bộ (self-invocation) không đi qua proxy của Spring nên annotation trên method đích vô hiệu.
+- **Fix:** Tách các biên transaction theo manager thành các bean riêng, gọi nhau qua biên bean như `PointsDebitPort` và `GiftRedemptionRecorder` ở mục Code.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay (viết, vẽ sơ đồ, đọc code) — không có chấm tự động.
+
+1. **Vẽ sơ đồ:** Vẽ đủ 5 cụm của Nova Loyalty (core, gift, report, legacy, audit), mỗi cụm ghi package entity, package repository, tên 3 bean và pool size giả định; đánh dấu cụm `@Primary`.
+2. **Đọc code trả lời:** Đọc `RedemptionService` và `GiftRedemptionRecorder` ở mục Code: nếu bước ghi nhận đổi quà thất bại sau khi trừ điểm đã commit, hệ thống tự chữa bằng cơ chế nào trong thiết kế này, và dữ liệu nào là bằng chứng để đối soát?
+3. **Viết code:** Viết khung cấu hình cho cụm `audit` theo đúng mẫu của cụm core, gồm cả `@EnableJpaRepositories` với các `Ref` đúng tên.
+4. **Viết tay phân tích:** Viết một trang phân tích cho một luồng xuyên 3 database tự chọn: liệt kê từng bước, biên atomic của từng bước, hành vi khi từng bước thất bại và thao tác bù trừ tương ứng.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Boot — Working with Multiple DataSources: https://docs.spring.io/spring-boot/reference/data/sql.html
+- Spring Framework — Transaction Management: https://docs.spring.io/spring-framework/reference/data-access/transaction.html
+- Spring Data JPA — Configuration: https://docs.spring.io/spring-data/jpa/reference/repositories/create-instances.html
+- Spring Boot — JPA Properties theo Persistence Unit: https://docs.spring.io/spring-boot/reference/data/sql.html
+
+## Đọc thêm
+
+Không có.

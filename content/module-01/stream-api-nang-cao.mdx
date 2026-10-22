@@ -1,0 +1,191 @@
+---
+title: "Stream API nâng cao: Collectors, groupingBy và teeing"
+module: 1
+level: "Junior"
+duration: 40
+order: 4
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Dùng thành thạo `Collectors.groupingBy` với downstream collector để gom nhóm và tính tổng/đếm/trung bình trong một lần duyệt.
+- Kết hợp được hai kết quả tổng hợp trong một lần duyệt bằng `Collectors.teeing`, và tuỳ biến collector khi cần với `Collector.of`.
+- Nhận diện được các cạm bẫy của parallel stream: dùng sai với stream nhỏ, nguồn dữ liệu không splittable, và tác vụ có side-effect dùng chung trạng thái.
+
+## Vì sao cần biết
+
+Nova Loyalty phải tổng hợp điểm liên tục: tổng điểm theo từng nguồn ví trong 3 nguồn, số giao dịch theo trạng thái, danh sách giao dịch mới nhất theo hội viên để hiển thị và để đối soát với CRM sau khi đồng bộ qua Kafka. Những phép tổng hợp này viết bằng vòng lặp thủ công rất dễ sai ở các chi tiết như nhóm rỗng, giá trị null, hay tính trùng hai lần duyệt. Stream API với collectors cho cách viết khai báo, một lần duyệt, dễ kiểm chứng. Ngược lại, parallel stream là con dao hai lưỡi thường bị lạm dụng trong các service này: bật song song cho một danh sách vài chục giao dịch không những không nhanh hơn mà còn tranh chấp ForkJoinPool chung, làm chậm cả request khác trong cùng pod.
+
+## Nội dung chính
+
+### Collector là một công thức thu gọn có cấu trúc
+
+Một `Collector` mô tả bốn việc: tạo container chứa kết quả trung gian (`supplier`), nạp từng phần tử vào container (`accumulator`), hợp nhất hai container khi chạy song song (`combiner`), và chuyển container thành kết quả cuối (`finisher`). Hiểu cấu trúc này giúp lý giải vì sao collector chạy đúng cả tuần tự lẫn song song, và vì sao các collector có sẵn luôn an toàn hơn code tự cộng dồn vào biến bên ngoài stream.
+
+### groupingBy và downstream collector
+
+`groupingBy` phân loại mỗi phần tử vào một nhóm theo classifier, rồi áp dụng một downstream collector cho từng nhóm. Các downstream thường dùng:
+
+- `counting()` đếm số phần tử mỗi nhóm.
+- `summingLong`, `averagingDouble` tính tổng/trung bình.
+- `mapping` biến đổi phần tử trước khi đưa vào collector con, ví dụ chỉ lấy id giao dịch.
+- `collectingAndThen` hậu xử lý kết quả của collector con, ví dụ bọc list thành bất biến.
+- `maxBy`, `minBy` lấy phần tử cực trị mỗi nhóm, trả về `Optional`.
+
+Lồng hai tầng `groupingBy` cho ra phân loại hai cấp, ví dụ theo nguồn ví rồi theo trạng thái giao dịch.
+
+### teeing: hai kết quả, một lần duyệt
+
+`Collectors.teeing` (từ Java 12) chạy hai collector trên cùng một stream và hợp nhất hai kết quả bằng một hàm merger. Đây là lựa chọn đúng khi cần đồng thời tổng điểm và số giao dịch, hoặc giá trị lớn nhất và nhỏ nhất, mà không muốn duyệt stream hai lần — điều quan trọng khi nguồn stream chỉ duyệt được một lần hoặc việc tính toán từng phần tử tốn kém.
+
+### Parallel stream và các cạm bẫy
+
+`parallelStream()` chạy trên ForkJoinPool chung của JVM. Chỉ cân nhắc song song khi đồng thời thoả mãn: số phần tử lớn, phép tính mỗi phần tử đủ nặng, nguồn dữ liệu splittable tốt (mảng, `ArrayList`), và thao tác không có side-effect dùng chung trạng thái mutable. Các cạm bẫy kinh điển:
+
+- Dùng cho danh sách nhỏ: chi phí chia việc và hợp nhất lớn hơn lợi ích.
+- Dùng chung pool: một tác vụ song song dài chiếm pool chung, ảnh hưởng mọi parallel stream khác trong cùng process.
+- Side-effect vào collection không thread-safe: mất dữ liệu, lỗi khó tái hiện.
+- Thao tác chặn I/O trong parallel stream: block worker của pool chung, gây nghẽn dây chuyền.
+
+Trong một service Spring Boot phục vụ request, mặc định an toàn là stream tuần tự; song song chỉ khi đã đo được lợi ích trên dữ liệu thật.
+
+<Mermaid chart={`flowchart LR
+  A["Stream giao dịch điểm"] --> B["groupingBy theo nguồn ví"]
+  B --> C["downstream summingLong - tổng điểm"]
+  B --> D["downstream counting - số giao dịch"]
+  A --> E["teeing: tổng và đếm trong một lần duyệt"]
+  E --> F["Báo cáo đối soát CRM"]`} label="Hai cách tổng hợp giao dịch điểm tại Nova Loyalty: groupingBy với downstream collector, và teeing cho hai kết quả trong một lần duyệt." />
+
+### Đọc code stream của người khác
+
+Khi review stream dài, hãy tách theo ba câu hỏi: nguồn dữ liệu và tính splittable là gì, các phép biến đổi trung gian có lazy hay không, và collector cuối có combiner đúng cho song song hay không. Trả lời ba câu này giúp phát hiện hầu hết lỗi: sửa collection đang stream, dùng `findAny` khi cần `findFirst`, hoặc quên rằng `stream()` trên một nguồn chỉ dùng được một lần.
+
+## Code
+
+Các snippet dưới đây chỉ cần JDK 21, không thêm dependency. Model giao dịch dùng record:
+
+```java filename=PointTransaction.java
+package com.nova.loyalty.reporting;
+
+import java.time.Instant;
+
+public record PointTransaction(
+        Long memberId,
+        long delta,
+        String walletSource,
+        String status,
+        Instant createdAt) {
+}
+```
+
+Service tổng hợp: nhóm theo nguồn ví, teeing cho tổng và đếm, và lấy giao dịch mới nhất theo hội viên:
+
+```java filename=PointsReportService.java
+package com.nova.loyalty.reporting;
+
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+public class PointsReportService {
+
+    public Map<String, Long> totalByWalletSource(List<PointTransaction> transactions) {
+        return transactions.stream()
+                .collect(Collectors.groupingBy(
+                        PointTransaction::walletSource,
+                        Collectors.summingLong(PointTransaction::delta)));
+    }
+
+    public Map<String, List<Long>> memberIdsByStatus(List<PointTransaction> transactions) {
+        return transactions.stream()
+                .collect(Collectors.groupingBy(
+                        PointTransaction::status,
+                        Collectors.mapping(PointTransaction::memberId, Collectors.toList())));
+    }
+
+    public Summary summarize(List<PointTransaction> transactions) {
+        return transactions.stream().collect(Collectors.teeing(
+                Collectors.summingLong(PointTransaction::delta),
+                Collectors.counting(),
+                Summary::new));
+    }
+
+    public Map<Long, PointTransaction> latestByMember(List<PointTransaction> transactions) {
+        return transactions.stream().collect(Collectors.toMap(
+                PointTransaction::memberId,
+                tx -> tx,
+                (a, b) -> a.createdAt().isAfter(b.createdAt()) ? a : b));
+    }
+
+    public Optional<PointTransaction> largestEarn(List<PointTransaction> transactions) {
+        return transactions.stream()
+                .filter(tx -> tx.delta() > 0)
+                .collect(Collectors.maxBy(Comparator.comparingLong(PointTransaction::delta)));
+    }
+
+    public record Summary(long totalDelta, long transactionCount) {
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Cộng dồn vào biến bên ngoài stream
+
+- **Triệu chứng:** Tổng sai khi chuyển sang parallel stream, hoặc code bị cấm dùng biến không effectively final.
+- **Nguyên nhân:** Stream yêu cầu phép thu gọn qua collector có combiner đúng; mutate biến ngoài phá vỡ mô hình đó.
+- **Fix:** Dùng `summingLong`, `reduce`, hoặc collector phù hợp thay cho biến cộng dồn thủ công.
+
+### 2. Bật parallelStream cho mọi danh sách
+
+- **Triệu chứng:** Request chậm hơn khi tải cao, các tác vụ khác trong cùng pod bị ảnh hưởng không rõ nguyên nhân.
+- **Nguyên nhân:** Parallel stream dùng ForkJoinPool chung; danh sách nhỏ hoặc tác vụ nhẹ khiến chi phí điều phối vượt lợi ích.
+- **Fix:** Mặc định tuần tự; chỉ song song khi đã đo trên dữ liệu thật và hiểu tác động lên pool chung.
+
+### 3. Side-effect vào collection dùng chung trong stream
+
+- **Triệu chứng:** Kết quả thiếu phần tử ngẫu nhiên, lỗi chỉ xuất hiện khi chạy song song hoặc tải cao.
+- **Nguyên nhân:** Thêm phần tử vào `ArrayList` bên ngoài từ nhiều thread không an toàn.
+- **Fix:** Thu kết quả bằng `toList`/`toMap` của collector; loại bỏ side-effect khỏi các phép biến đổi stream.
+
+### 4. Dùng lại một stream sau khi đã terminal operation
+
+- **Triệu chứng:** `IllegalStateException` báo stream đã được vận hành hoặc đóng.
+- **Nguyên nhân:** Mỗi stream chỉ duyệt được đúng một lần; terminal operation tiêu thụ nó.
+- **Fix:** Tạo stream mới từ nguồn cho mỗi lần duyệt, hoặc dùng `teeing` khi cần hai kết quả từ một lần duyệt.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay (viết, vẽ sơ đồ, đọc code) — không có chấm tự động.
+
+1. **Viết code:** Dùng `groupingBy` hai tầng để thống kê số giao dịch theo nguồn ví rồi theo trạng thái từ một `List` giao dịch tự tạo.
+2. **Viết code:** Dùng `teeing` tính đồng thời tổng điểm cộng, tổng điểm trừ và hợp nhất thành một record `InOut` trong một lần duyệt.
+3. **Đọc code trả lời:** Đọc `latestByMember` ở mục Code: hàm hợp nhất khi trùng khoá hoạt động thế nào, và điều gì xảy ra nếu bỏ hàm đó mà dữ liệu có hai giao dịch cùng hội viên?
+4. **Viết tay phân tích:** Cho một danh sách 30 giao dịch và một danh sách 2 triệu giao dịch, nêu quyết định dùng stream tuần tự hay song song cho từng trường hợp kèm 3 tiêu chí đã cân nhắc.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Dev.java — Stream API: https://dev.java/learn/api/collections-and-streams/streams/
+- Dev.java — Collectors: https://dev.java/learn/api/collections-and-streams/streams/using-collectors/
+- JEP 461 — Stream Gatherers (tham khảo hướng phát triển): https://openjdk.org/jeps/461
+- Spring Boot — Reference Documentation: https://docs.spring.io/spring-boot/reference/
+
+## Đọc thêm
+
+Không có.

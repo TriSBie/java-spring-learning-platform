@@ -1,0 +1,198 @@
+---
+title: "Method Security với @EnableMethodSecurity và @PreAuthorize"
+module: 4
+level: "Middle"
+duration: 45
+order: 3
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Spring Security 6.3.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Bật và cấu hình được method security bằng `@EnableMethodSecurity` trong Spring Security 6.
+- Viết được biểu thức SpEL trong `@PreAuthorize` để kiểm tra role, authority và quyền trên chính đối tượng dữ liệu (object-level authorization).
+- Chỉ ra được vì sao phân quyền phải đặt ở tầng service, không chỉ dựa vào rule theo URL ở filter chain.
+
+## Vì sao cần biết
+
+Nova Loyalty có các thao tác nhạy cảm như điều chỉnh điểm thủ công, duyệt đổi quà và xem ví của khách hàng khác. Rule theo URL ở gateway và filter chain chỉ biết path, không biết ví điểm trong request thuộc về ai. Một nhân viên hỗ trợ có quyền xem ví của nhóm khách được phân công, nhưng không được xem mọi ví; một khách hàng chỉ được trừ điểm từ ví của chính mình. Những quyết định này cần dữ liệu nghiệp vụ nên phải nằm ở tầng service, nơi đối tượng thật được nạp lên. Method security là cơ chế chuẩn để gắn quyết định đó ngay tại biên của service.
+
+## Nội dung chính
+
+### Hai lớp phân quyền bổ sung cho nhau
+
+Phân quyền trong một service Spring thường có hai lớp:
+
+- Lớp coarse-grained ở filter chain: path nào cần đăng nhập, role tổng quát nào được vào khu vực nào.
+- Lớp fine-grained ở method: method này cần authority cụ thể nào, và người gọi có quyền trên đúng đối tượng đang thao tác hay không.
+
+Thiếu lớp thứ hai, một role hợp lệ ở mức URL vẫn có thể thao tác chéo dữ liệu của người khác nếu controller quên kiểm tra thủ công.
+
+### @EnableMethodSecurity
+
+Annotation `@EnableMethodSecurity` đặt trên lớp cấu hình sẽ bật AOP proxy cho các annotation phân quyền trên method. Từ Spring Security 6, đây là cách hiện đại và duy nhất nên dùng; các cơ chế kích hoạt kiểu cũ đã bị loại bỏ khỏi framework. Khi bật, bạn có thể dùng `@PreAuthorize`, `@PostAuthorize`, `@Secured` và annotation phân quyền theo JSR-250 tùy cấu hình.
+
+Mặc định quan trọng cần nhớ: method security chỉ hoạt động trên bean do Spring quản lý và lời gọi đi qua proxy. Tự gọi một method có annotation từ chính bên trong cùng class sẽ bỏ qua proxy và không được kiểm tra.
+
+### SpEL trong @PreAuthorize
+
+`@PreAuthorize` đánh giá biểu thức SpEL trước khi method chạy. Các thành phần hay dùng:
+
+- `hasRole('OPS_ADMIN')` và `hasAuthority('points:adjust')` để kiểm tra quyền tĩnh.
+- `authentication.name` là principal hiện tại, dùng để so với chủ sở hữu của đối tượng.
+- Tham số của method được tham chiếu bằng tên hoặc bằng chỉ số tham số, cho phép viết rule như: principal phải trùng với `memberId` được truyền vào, trừ khi có role quản trị.
+- Bean hỗ trợ có thể được gọi từ SpEL để đóng gói logic phức tạp, ví dụ một bean kiểm tra quyền sở hữu ví.
+
+Biểu thức nên ngắn và dễ đọc; logic dài, có truy vấn database, nên chuyển vào một bean kiểm tra riêng và gọi từ SpEL để dễ test.
+
+<Mermaid chart={`flowchart TD
+  A[Goi method service] --> B[Proxy cua method security]
+  B --> C{Danh gia PreAuthorize}
+  C -->|Du quyen| D[Chay logic nghiep vu]
+  C -->|Thieu quyen| E[AccessDeniedException - 403]
+  D --> F{PostAuthorize neu co}
+  F --> G[Tra ket qua]
+`} label="Method security chặn lời gọi ở proxy trước khi logic nghiệp vụ chạy; thiếu quyền sẽ ném AccessDeniedException." />
+
+### Object-level authorization và IDOR
+
+Lỗ hổng IDOR (Insecure Direct Object Reference) xuất hiện khi API nhận một id từ client và thao tác thẳng lên đối tượng đó mà không kiểm tra quyền sở hữu. Với ví điểm của Nova, việc chỉ kiểm tra `hasRole('CUSTOMER')` là không đủ: khách A vẫn có thể gửi `memberId` của khách B. Rule đúng phải kết hợp cả hai: có role phù hợp VÀ (là chủ ví HOẶC có authority quản trị).
+
+### Xử lý AccessDeniedException
+
+Khi `@PreAuthorize` thất bại, framework ném `AccessDeniedException`. Tầng web cần ánh xạ ngoại lệ này thành HTTP 403 nhất quán, tránh để lộ chi tiết nội bộ trong thông điệp lỗi, và ghi log sự kiện bị từ chối phục vụ điều tra. Không nên biến lỗi 403 thành 200 kèm thông điệp mềm, vì client và hệ giám sát sẽ hiểu sai bản chất sự cố.
+
+## Code
+
+Bật method security và viết service có kiểm tra quyền trên đối tượng. Dependency: `spring-boot-starter-security` và `spring-boot-starter-aop` khi cần.
+
+```java filename=MethodSecurityConfig.java
+package com.nova.loyalty.security;
+
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
+
+@Configuration
+@EnableMethodSecurity
+public class MethodSecurityConfig {
+}
+```
+
+```java filename=WalletAccessChecker.java
+package com.nova.loyalty.points;
+
+import org.springframework.security.core.Authentication;
+import org.springframework.stereotype.Component;
+
+@Component("walletAccess")
+public class WalletAccessChecker {
+
+    private final PointsWalletRepository walletRepository;
+
+    public WalletAccessChecker(PointsWalletRepository walletRepository) {
+        this.walletRepository = walletRepository;
+    }
+
+    public boolean canAccess(Authentication authentication, Long memberId) {
+        if (authentication == null || memberId == null) {
+            return false;
+        }
+        boolean isOwner = String.valueOf(memberId).equals(authentication.getName());
+        boolean isAdmin = authentication.getAuthorities().stream()
+                .anyMatch(a -> a.getAuthority().equals("ROLE_OPS_ADMIN"));
+        boolean walletExists = walletRepository.existsByMemberId(memberId);
+        return walletExists && (isOwner || isAdmin);
+    }
+}
+```
+
+```java filename=PointsAdminService.java
+package com.nova.loyalty.points;
+
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+@Service
+public class PointsAdminService {
+
+    private final PointsWalletRepository walletRepository;
+
+    public PointsAdminService(PointsWalletRepository walletRepository) {
+        this.walletRepository = walletRepository;
+    }
+
+    @PreAuthorize("@walletAccess.canAccess(authentication, #memberId)")
+    @Transactional(transactionManager = "coreTransactionManager")
+    public PointsWalletView getWallet(Long memberId) {
+        PointsWallet wallet = walletRepository.findByMemberId(memberId)
+                .orElseThrow(() -> new IllegalArgumentException("Wallet not found"));
+        return new PointsWalletView(wallet.getMemberId(), wallet.getBalance(), wallet.getVersion());
+    }
+
+    @PreAuthorize("hasAuthority('points:adjust') and @walletAccess.canAccess(authentication, #memberId)")
+    @Transactional(transactionManager = "coreTransactionManager")
+    public PointsWalletView adjustPoints(Long memberId, long delta) {
+        PointsWallet wallet = walletRepository.findByMemberId(memberId)
+                .orElseThrow(() -> new IllegalArgumentException("Wallet not found"));
+        wallet.applyDelta(delta);
+        PointsWallet saved = walletRepository.save(wallet);
+        return new PointsWalletView(saved.getMemberId(), saved.getBalance(), saved.getVersion());
+    }
+
+    public record PointsWalletView(Long memberId, long balance, long version) {
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Chỉ phân quyền theo URL, bỏ qua quyền trên đối tượng
+
+- **Triệu chứng:** Khách hàng đổi `memberId` trong request và xem hoặc trừ điểm được ví của người khác (IDOR).
+- **Nguyên nhân:** Rule ở filter chain chỉ biết path và role tổng quát, không biết chủ sở hữu của đối tượng được thao tác.
+- **Fix:** Thêm `@PreAuthorize` ở tầng service kiểm tra cả authority và quyền sở hữu trên đúng đối tượng.
+
+### 2. Tự gọi method có annotation trong cùng class
+
+- **Triệu chứng:** `@PreAuthorize` lúc chạy lúc không, đặc biệt khi method được gọi nội bộ.
+- **Nguyên nhân:** Method security hoạt động qua AOP proxy; lời gọi `this.method()` bỏ qua proxy nên không bị chặn.
+- **Fix:** Tách method cần bảo vệ sang bean service khác, hoặc thiết kế lại ranh giới gọi để luôn đi qua proxy của Spring.
+
+### 3. Nhồi logic phức tạp và truy vấn nặng vào SpEL
+
+- **Triệu chứng:** Biểu thức SpEL dài khó đọc, lỗi chính tả chỉ lộ ra lúc runtime, test gần như không viết được.
+- **Nguyên nhân:** Viết mọi điều kiện trực tiếp trong chuỗi annotation thay vì đóng gói thành bean kiểm tra.
+- **Fix:** Giữ SpEL ngắn, chuyển logic vào một bean như `WalletAccessChecker`, viết unit test cho bean đó và cho cả rule ở mức tích hợp.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được; trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay, không có chấm tự động.
+
+1. Viết bảng phân quyền cho ba thao tác của Nova Loyalty (xem ví, điều chỉnh điểm, duyệt đổi quà) gồm role, authority và điều kiện sở hữu tương ứng.
+2. Viết lại một rule URL-only thành rule hai lớp: filter chain và `@PreAuthorize`; giải thích mỗi lớp chặn được loại tấn công nào.
+3. Tìm trong một đoạn mô tả nghiệp vụ tự chọn một nguy cơ IDOR và viết biểu thức kiểm tra quyền sở hữu tương ứng, kèm ba ca test (chủ sở hữu, người khác, quản trị viên).
+4. Mô tả cách bạn kiểm chứng rằng lời gọi nội bộ trong cùng class không bỏ qua method security trong thiết kế của mình.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Security — Method Security: https://docs.spring.io/spring-security/reference/servlet/authorization/method-security.html
+- Spring Security — Authorization tổng quan: https://docs.spring.io/spring-security/reference/servlet/authorization/index.html
+- Spring Framework — SpEL Reference: https://docs.spring.io/spring-framework/reference/core/expressions.html
+
+## Đọc thêm
+
+Không có.

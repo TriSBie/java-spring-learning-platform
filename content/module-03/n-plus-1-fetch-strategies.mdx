@@ -1,0 +1,191 @@
+---
+title: "N+1: phát hiện và các chiến lược fetch"
+module: 3
+level: "Middle"
+duration: 50
+order: 2
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Spring Data JPA 3.3.x", "Hibernate 6.5.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Nhận diện được bài toán N+1 từ triệu chứng và chứng minh được nó bằng log SQL cùng thống kê Hibernate thay vì cảm tính.
+- Áp dụng đúng từng chiến lược: `JOIN FETCH`, `@EntityGraph`, batch fetching và DTO projection, kèm đánh đổi của mỗi lựa chọn.
+- Quyết định được khi nào không dùng `JOIN FETCH` cho nhiều collection cùng lúc và cách xử lý phân trang khi có fetch join trên collection.
+
+## Vì sao cần biết
+
+Ở Nova Loyalty, màn hình đối soát của đội vận hành liệt kê các ví điểm kèm lịch sử giao dịch gần nhất, và job tổng hợp gửi dữ liệu sang CRM cũng duyệt qua hàng loạt ví cùng giao dịch của chúng. Cả hai đều là mảnh đất màu mỡ cho N+1: nạp 50 ví bằng một query rồi mỗi ví phát thêm một query lấy giao dịch, thành 51 query cho một màn hình; khi số ví tăng lên hàng nghìn trong job đêm, số query tăng tuyến tính và pool `core` bị chiếm dụng tới mức traffic cộng điểm thật bị chậm theo. N+1 nguy hiểm ở chỗ code trông hoàn toàn bình thường và test với 3 dòng dữ liệu luôn xanh — nó chỉ lộ diện ở quy mô production. Kỹ năng ở bài này là biến việc phát hiện N+1 thành quy trình có bằng chứng: bật thống kê, đếm query, rồi chọn chiến lược fetch có chủ đích.
+
+## Nội dung chính
+
+### Bài toán N+1 là gì
+
+N+1 xảy ra khi một query đầu tiên nạp N entity cha, rồi việc truy cập một quan hệ lười của từng entity cha phát thêm một query cho mỗi entity: tổng cộng 1 + N query cho một đơn vị công việc. Ba nguồn phát sinh phổ biến:
+
+- Truy cập collection lười trong vòng lặp hoặc khi serialize DTO từ entity.
+- Truy cập quan hệ nhiều-một lười của từng phần tử trong danh sách kết quả.
+- Nhiều tầng lười lồng nhau khiến hệ số nhân lớn hơn một tầng.
+
+Chữ ký nhận diện trong log rất đặc trưng: một câu SQL chính, tiếp nối bởi hàng loạt câu SQL giống hệt nhau chỉ khác tham số id.
+
+### Phát hiện bằng bằng chứng
+
+- Bật log câu lệnh SQL ở môi trường phát triển và đọc mẫu lặp lại của các câu query theo id.
+- Bật thống kê Hibernate (`generate_statistics`) và đọc số lượng câu statement được prepare/thực thi cho một request hoặc một test để khẳng định định lượng trước và sau khi sửa.
+- Viết test đếm query cho các truy vấn nóng: một test khẳng định số query tối đa cho một kịch bản cố định sẽ biến N+1 thành lỗi đỏ ngay trong CI thay vì sự cố production.
+- Ở production, dựa vào metric/trace của tầng dữ liệu (ví dụ số query theo endpoint) để phát hiện bất thường, không dựa vào log SQL toàn lượng vốn quá nặng.
+
+### Các chiến lược fetch và đánh đổi
+
+`JOIN FETCH` trong JPQL nạp quan hệ ngay trong cùng query bằng phép join. Mạnh cho một quan hệ cụ thể của một truy vấn cụ thể; rủi ro: fetch nhiều collection cùng lúc tạo tích Descartes làm phình kết quả và có thể gây lỗi trong bộ nhớ khi Hibernate phải khử trùng lặp, đồng thời fetch join trên collection làm phân trang ở tầng database không còn đúng — Hibernate phải phân trang trong bộ nhớ kèm cảnh báo.
+
+`@EntityGraph` khai báo đồ thị các thuộc tính cần nạp, dùng lại được ở nhiều query và giữ câu JPQL sạch. Có hai loại đồ thị nạp (fetch graph và load graph) khác nhau ở cách đối xử với các quan hệ không được liệt kê. EntityGraph phù hợp khi cùng một hình dạng dữ liệu được nhiều nơi dùng lại.
+
+Batch fetching (bài trước) không đổi query mà đổi cách nạp lười theo lô, phù hợp khi dữ liệu con cần cho mọi entity cha nhưng việc join sẽ phình dữ liệu hoặc query có nhiều biến thể.
+
+DTO projection nạp thẳng vào object kết quả bằng constructor expression hoặc interface projection: database chỉ trả các cột cần, không entity, không dirty checking, không nạp lười — lựa chọn tốt nhất cho các màn hình chỉ đọc.
+
+<Mermaid chart={`flowchart TD
+  A["Phát hiện chuỗi query lặp theo id"] --> B{"Dữ liệu con cần cho mọi entity cha?"}
+  B -->|"Một quan hệ, một query"| C["JOIN FETCH hoặc EntityGraph"]
+  B -->|"Nhiều biến thể query"| D["Batch fetching"]
+  B -->|"Chỉ đọc, cần ít cột"| E["DTO projection"]
+  C --> F["Đo lại số query bằng thống kê"]
+  D --> F
+  E --> F`} label="Cây quyết định chọn chiến lược trị N+1 tại Nova Loyalty: chọn theo hình dạng truy cập, luôn đo lại sau khi sửa." />
+
+### Phân trang kết hợp fetch join trên collection
+
+Khi một query vừa phân trang vừa fetch join một collection, Hibernate không đẩy giới hạn xuống database một cách an toàn vì một entity cha chiếm nhiều dòng sau join. Kết quả là nó nạp toàn bộ rồi cắt trang trong bộ nhớ và ghi log cảnh báo. Cách xử lý đúng là tách hai bước: query đầu chỉ lấy id của trang cần thiết có phân trang ở database, query thứ hai fetch đầy đủ dữ liệu cho đúng các id đó mà không phân trang nữa.
+
+## Code
+
+Cần dependency `spring-boot-starter-data-jpa` trong `pom.xml`.
+
+Ba biến thể truy vấn cho cùng một nhu cầu — nạp ví kèm giao dịch — để đối chiếu trong review:
+
+```java filename=PointsWalletRepository.java
+package com.nova.loyalty.core.repository;
+
+import com.nova.loyalty.core.domain.PointsWallet;
+import java.util.List;
+import java.util.Optional;
+import org.springframework.data.jpa.repository.EntityGraph;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+
+public interface PointsWalletRepository extends JpaRepository<PointsWallet, Long> {
+
+    @Query("select distinct w from PointsWallet w left join fetch w.transactions where w.memberId = :memberId")
+    Optional<PointsWallet> findWithTransactionsByMemberId(@Param("memberId") Long memberId);
+
+    @EntityGraph(attributePaths = {"transactions"})
+    List<PointsWallet> findAllByMemberIdIn(List<Long> memberIds);
+
+    @Query("select w.id from PointsWallet w order by w.id")
+    List<Long> findPageOfIds(org.springframework.data.domain.Pageable pageable);
+
+    @Query("select distinct w from PointsWallet w left join fetch w.transactions where w.id in :ids")
+    List<PointsWallet> findWithTransactionsByIds(@Param("ids") List<Long> ids);
+}
+```
+
+DTO projection cho màn hình đối soát chỉ đọc, không chạm vào entity. Record kết quả là một type độc lập ở cùng package:
+
+```java filename=WalletSummary.java
+package com.nova.loyalty.core.reporting;
+
+public record WalletSummary(Long memberId, long balance, long transactionCount) {
+}
+```
+
+```java filename=WalletSummaryRepository.java
+package com.nova.loyalty.core.reporting;
+
+import com.nova.loyalty.core.domain.PointsWallet;
+import java.util.List;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+
+public interface WalletSummaryRepository extends JpaRepository<PointsWallet, Long> {
+
+    @Query("""
+            select new com.nova.loyalty.core.reporting.WalletSummary(
+                w.memberId, w.balance, count(t.id))
+            from PointsWallet w left join w.transactions t
+            group by w.memberId, w.balance
+            order by w.memberId
+            """)
+    List<WalletSummary> summarizeAll();
+}
+```
+
+Bật thống kê Hibernate trong môi trường kiểm chứng để đếm query trước và sau khi sửa:
+
+```properties filename=application.properties
+spring.jpa.properties.hibernate.generate_statistics=true
+spring.jpa.properties.hibernate.session.events.log.LOG_QUERIES_SLOWER_THAN_MS=0
+logging.level.org.hibernate.SQL=DEBUG
+logging.level.org.hibernate.stat=INFO
+```
+
+## Sai lầm thường gặp
+
+### 1. Fetch join hai collection cùng lúc
+
+- **Triệu chứng:** Kết quả phình lớn bất thường, bộ nhớ tăng vọt, hoặc Hibernate báo lỗi khi fetch nhiều bag cùng lúc.
+- **Nguyên nhân:** Join đồng thời hai collection tạo tích Descartes; với các collection kiểu bag, Hibernate không khử trùng lặp an toàn được.
+- **Fix:** Fetch từng collection ở query riêng, dùng batch fetching cho các collection còn lại, hoặc đổi một phía sang `Set` có chủ đích sau khi hiểu đánh đổi.
+
+### 2. Phân trang trực tiếp trên query có fetch join collection
+
+- **Triệu chứng:** Log xuất hiện cảnh báo phân trang trong bộ nhớ, hiệu năng sụp khi bảng lớn dù trang chỉ lấy ít dòng.
+- **Nguyên nhân:** Một entity cha chiếm nhiều dòng sau join nên giới hạn trang ở database không tương đương giới hạn theo entity.
+- **Fix:** Tách hai bước: phân trang lấy id ở database trước, rồi fetch đầy đủ dữ liệu cho các id đó.
+
+### 3. Chữa N+1 bằng cách đổi mọi thứ sang EAGER
+
+- **Triệu chứng:** N+1 ở chỗ này biến mất nhưng mọi query khác trong hệ thống đều kéo theo đồ thị quan hệ không cần thiết.
+- **Nguyên nhân:** `EAGER` là quyết định toàn cục trên mapping, áp dụng cả cho các truy vấn không cần dữ liệu đó.
+- **Fix:** Giữ mapping `LAZY`, chữa ở tầng query bằng fetch join, entity graph, batch hoặc projection cho đúng truy vấn có nhu cầu.
+
+### 4. Kết luận đã hết N+1 mà không đo lại
+
+- **Triệu chứng:** Sau khi "sửa", số query giảm một phần nhưng vẫn tăng tuyến tính theo số entity ở một quan hệ khác.
+- **Nguyên nhân:** Một đồ thị dữ liệu có thể chứa nhiều tầng N+1 độc lập; sửa tầng ngoài cùng chỉ lộ tầng tiếp theo.
+- **Fix:** Đo lại bằng thống kê Hibernate cho cùng kịch bản và viết test đếm query khóa lại kết quả.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay (viết, vẽ sơ đồ, đọc code) — không có chấm tự động.
+
+1. **Đọc code trả lời:** Đọc `PointsWalletRepository` ở mục Code: phân biệt tình huống nên dùng `findWithTransactionsByMemberId`, `findAllByMemberIdIn` và cặp hai query phân trang theo id, mỗi tình huống một ví dụ cụ thể.
+2. **Viết code:** Viết lại một đoạn duyệt danh sách ví và đọc số dư từng ví kèm giao dịch mới nhất (đang gây N+1) bằng hai cách khác nhau, ghi rõ số query dự kiến của mỗi cách với 100 ví.
+3. **Vẽ sơ đồ:** Vẽ chuỗi query của một request trước khi sửa (1 + N) và sau khi sửa bằng từng chiến lược, đánh dấu tổng số query theo N.
+4. **Viết tay kế hoạch đo:** Viết kế hoạch đo cho một endpoint nghi ngờ N+1 gồm cách bật thống kê, kịch bản cố định, chỉ số khẳng định trước/sau và ngưỡng để viết test đếm query trong CI.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Data JPA — Query Methods: https://docs.spring.io/spring-data/commons/reference/repositories/query-methods.html
+- Spring Data JPA — EntityGraph: https://docs.spring.io/spring-data/jpa/reference/repositories/core-concepts.html
+- Spring Boot — SQL và JPA Properties: https://docs.spring.io/spring-boot/reference/data/sql.html
+- Spring Framework — ORM và Hibernate: https://docs.spring.io/spring-framework/reference/data-access/orm.html
+
+## Đọc thêm
+
+Không có.

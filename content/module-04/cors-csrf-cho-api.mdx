@@ -1,0 +1,184 @@
+---
+title: "CORS và CSRF cho API stateless dùng token"
+module: 4
+level: "Junior"
+duration: 40
+order: 4
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Spring Security 6.3.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Cấu hình được CORS đúng cho API của Nova Loyalty: origin cụ thể, method và header cần thiết, không dùng wildcard kèm credentials.
+- Giải thích được vì sao API stateless dùng bearer token trong header thường tắt CSRF một cách có cơ sở, và khi nào quyết định đó là sai.
+- Phân biệt được rủi ro của cookie-based auth và header-based auth để chọn cơ chế phù hợp cho từng client.
+
+## Vì sao cần biết
+
+Nova Loyalty phục vụ web app của đối tác, app nội bộ vận hành và traffic đi qua gateway ở các route `/v4/{gs,os,ws}/*`. Trình duyệt là môi trường khắt khe: nó chặn JavaScript đọc response khác origin nếu CORS sai, và nó tự động đính kèm cookie vào request, tạo ra bề mặt tấn công CSRF. Cấu hình CORS/CSRF theo cảm tính — kiểu bật hết cho chạy được — là một trong những lỗ hổng phổ biến nhất ở API thật: hoặc mở toang cho mọi trang web gọi API bằng cookie của nạn nhân, hoặc chặn nhầm toàn bộ client hợp lệ vào ngày ra mắt.
+
+## Nội dung chính
+
+### CORS là cơ chế của trình duyệt
+
+CORS (Cross-Origin Resource Sharing) là cách máy chủ nói với trình duyệt rằng JavaScript từ một origin cụ thể được phép đọc response. CORS không bảo vệ máy chủ khỏi các client không phải trình duyệt: một công cụ dòng lệnh vẫn gọi API bình thường bất kể CORS. Giá trị của CORS nằm ở việc ngăn trang web độc hại đọc dữ liệu trả về từ trình duyệt của nạn nhân.
+
+Khi request có header tùy biến như `Authorization`, trình duyệt gửi preflight request bằng method OPTIONS trước. Máy chủ phải trả lời đúng origin, method và header được phép thì request thật mới được gửi.
+
+### Cấu hình CORS chặt chẽ
+
+Ba nguyên tắc khi cấu hình:
+
+- Liệt kê origin cụ thể của client thật, không dùng dấu sao khi request mang credentials.
+- Chỉ cho phép method và header mà client thực sự cần, ví dụ `Authorization` và `Content-Type`.
+- Đặt thời gian cache cho preflight (`maxAge`) hợp lý để giảm số preflight lặp lại, nhưng không quá dài khiến thay đổi cấu hình khó có hiệu lực.
+
+Trong Spring Security, CORS phải được bật trong filter chain bằng `http.cors(...)` để preflight request được xử lý đúng vị trí, rất sớm trong chain, trước các bước xác thực.
+
+### CSRF tấn công bằng cookie tự động đính kèm
+
+CSRF (Cross-Site Request Forgery) lợi dụng việc trình duyệt tự gửi cookie của một site kèm mọi request tới site đó, kể cả request bị trang độc hại kích hoạt. Nếu API xác thực bằng cookie session, một form ở trang khác có thể khiến trình duyệt của nạn nhân gửi request đổi dữ liệu mà máy chủ không phân biệt được với thao tác thật.
+
+Biện pháp chuẩn cho cookie-based auth là CSRF token: máy chủ cấp một token bí mật mà trang độc hại không đọc được, và yêu cầu token đó trong mọi request thay đổi trạng thái.
+
+### Vì sao API bearer token thường tắt CSRF
+
+Với API stateless dùng `Authorization: Bearer ...` trong header, trình duyệt không tự động đính kèm header này. Trang độc hại không biết token và không thể tự thêm header `Authorization` đúng vào request giả mạo mà không kích hoạt preflight và bị CORS chặn đọc kết quả. Vì vậy, tắt CSRF cho API thuần bearer token là quyết định có cơ sở, với điều kiện bắt buộc: token không được lưu theo cách khiến trình duyệt tự gửi, và API không chấp nhận cookie làm cơ chế xác thực song song.
+
+Ngược lại, nếu cùng API đó cũng chấp nhận session cookie cho một web client, việc tắt CSRF sẽ mở lại đúng lỗ hổng kinh điển. Khi đó phải bật CSRF token cho phần cookie, hoặc tách bề mặt xác thực rõ ràng.
+
+<Mermaid chart={`flowchart TD
+  A[JS o origin doi tac] --> B{Request co header Authorization}
+  B -->|Co| C[Preflight OPTIONS]
+  C --> D{May chu tra CORS dung origin}
+  D -->|Dung| E[Gui request that kem Bearer token]
+  D -->|Sai| F[Trinh duyet chan, JS khong doc duoc response]
+  E --> G[API xu ly, khong dua vao cookie]
+`} label="Preflight CORS xảy ra trước request thật khi có header tùy biến; API bearer token không dựa vào cookie nên bề mặt CSRF khác hẳn cookie-based auth." />
+
+### Cookie và header: đánh đổi
+
+- Cookie: trình duyệt tự gửi, tiện cho web truyền thống, nhưng phải lo CSRF, `SameSite`, `HttpOnly` và `Secure`.
+- Header bearer token: client chủ động đính kèm, miễn nhiễm với CSRF kinh điển, nhưng token lưu ở phía client phải được bảo vệ khỏi XSS vì JavaScript đọc được token là kẻ tấn công cũng đọc được.
+
+Không có lựa chọn nào miễn nhiễm mọi thứ; chọn sai cho ngữ cảnh mới là lỗi.
+
+### Thứ tự kiểm tra khi gỡ lỗi CORS
+
+Khi một client trình duyệt báo lỗi CORS, hãy kiểm tra theo đúng thứ tự sau để tránh sửa mò:
+
+- Nhìn request preflight trong công cụ của trình duyệt: origin gửi lên là gì và có khớp danh sách cho phép hay không.
+- Kiểm tra response của preflight có đủ header cho phép origin, method và header mà request thật sẽ dùng hay không.
+- Kiểm tra request thật có chết ở xác thực (401) thay vì CORS hay không; hai lỗi này thường bị trộn làm một.
+- Đối chiếu cấu hình ở gateway và ở service: gateway của Nova đứng trước service, nên header CORS phải nhất quán ở cả hai tầng.
+- Ghi lại origin thật của từng môi trường; origin của môi trường kiểm thử và môi trường thật là các giá trị khác nhau và phải được liệt kê riêng.
+
+Một lỗi CORS được gỡ đúng thường kết thúc bằng một thay đổi cấu hình nhỏ và một ghi chú rõ ràng, không phải bằng việc nới lỏng toàn bộ chính sách.
+
+## Code
+
+Bật CORS trong filter chain với cấu hình nguồn bên ngoài, liệt kê origin cụ thể:
+
+```java filename=CorsSecurityConfig.java
+package com.nova.loyalty.security;
+
+import java.util.List;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.Customizer;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+
+@Configuration
+@EnableWebSecurity
+public class CorsSecurityConfig {
+
+    @Bean
+    public SecurityFilterChain apiChain(HttpSecurity http) throws Exception {
+        http
+            .securityMatcher("/v4/**")
+            .cors(Customizer.withDefaults())
+            .csrf(csrf -> csrf.disable())
+            .sessionManagement(session -> session
+                .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+            .authorizeHttpRequests(auth -> auth.anyRequest().authenticated())
+            .oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()));
+        return http.build();
+    }
+
+    @Bean
+    public CorsConfigurationSource corsConfigurationSource() {
+        CorsConfiguration config = new CorsConfiguration();
+        config.setAllowedOrigins(List.of(
+                "https://partner.nova.example.com",
+                "https://ops.nova.example.com"));
+        config.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
+        config.setAllowedHeaders(List.of("Authorization", "Content-Type", "Idempotency-Key"));
+        config.setExposedHeaders(List.of("X-Request-Id"));
+        config.setAllowCredentials(false);
+        config.setMaxAge(3600L);
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/v4/**", config);
+        return source;
+    }
+}
+```
+
+Ghi chú: dòng tắt CSRF ở trên chỉ đúng vì chain này là API thuần bearer token và `allowCredentials` là `false`. Nếu sau này chain chấp nhận cookie, phải đánh giá lại toàn bộ quyết định này.
+
+## Sai lầm thường gặp
+
+### 1. Dùng wildcard origin kèm credentials
+
+- **Triệu chứng:** Cấu hình cho phép mọi origin và vẫn bật gửi credential; trình duyệt từ chối hoặc, tệ hơn, mọi trang web đều đọc được response có dữ liệu người dùng.
+- **Nguyên nhân:** Đặt origin là dấu sao trong khi `allowCredentials` là `true` — kết hợp bị cấm theo đặc tả và cực kỳ nguy hiểm nếu lách bằng cách phản chiếu origin.
+- **Fix:** Liệt kê origin cụ thể của client thật; chỉ bật credentials khi thực sự dùng cookie và origin đã được pin chặt.
+
+### 2. Tắt CSRF trong khi API vẫn chấp nhận cookie
+
+- **Triệu chứng:** API có cả session cookie cho web nội bộ lẫn bearer token, và một trang ngoài có thể kích hoạt request thay đổi dữ liệu bằng cookie của nạn nhân.
+- **Nguyên nhân:** Sao chép cấu hình tắt CSRF của API thuần token sang bề mặt có cookie mà không đánh giá lại cơ chế xác thực.
+- **Fix:** Tách chain cho từng cơ chế, hoặc bật CSRF token cho phần cookie và dùng cookie có thuộc tính `SameSite` phù hợp.
+
+### 3. Cấu hình CORS ở controller nhưng quên bật trong filter chain
+
+- **Triệu chứng:** Preflight vẫn trả 401/403 dù controller đã gắn annotation CORS đầy đủ.
+- **Nguyên nhân:** Preflight bị chặn ở filter bảo mật trước khi tới tầng MVC vì `http.cors(...)` chưa được bật trong chain.
+- **Fix:** Bật CORS trong `SecurityFilterChain` và dùng một `CorsConfigurationSource` dùng chung, kiểm thử preflight bằng request OPTIONS thật.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được; trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay, không có chấm tự động.
+
+1. Viết cấu hình CORS cho hai client của Nova Loyalty (web đối tác và app vận hành) với origin, method, header cụ thể; giải thích vì sao không dùng wildcard.
+2. Vẽ trình tự preflight cho một request `POST` có header `Authorization` và `Idempotency-Key`, ghi rõ máy chủ phải trả những gì để request thật được gửi.
+3. Cho một API vừa có web client dùng cookie vừa có mobile client dùng bearer token: đề xuất cách tách chain và quyết định CSRF cho từng bề mặt, kèm lý do.
+4. Liệt kê ba thuộc tính cookie quan trọng (`HttpOnly`, `Secure`, `SameSite`) và mỗi thuộc tính chặn hoặc giảm thiểu loại tấn công nào.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Security — CORS: https://docs.spring.io/spring-security/reference/servlet/integrations/cors.html
+- Spring Security — CSRF Protection: https://docs.spring.io/spring-security/reference/servlet/exploits/csrf.html
+- Spring Framework — CORS Support: https://docs.spring.io/spring-framework/reference/web/webmvc-cors.html
+
+## Đọc thêm
+
+Không có.

@@ -1,0 +1,234 @@
+---
+title: "Testcontainers cho PostgreSQL và Kafka"
+module: 2
+level: "Middle"
+duration: 50
+order: 5
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Spring Data JPA 3.3.x", "Kafka 3.8"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Khởi tạo được container PostgreSQL và Kafka bằng Testcontainers trong test, lấy thông tin kết nối động thay vì cố định cổng.
+- Dùng được `@ServiceConnection` của Spring Boot 3 để nối container vào context test mà không viết glue code thủ công.
+- Thiết kế được vòng đời container theo test suite: dùng lại container khi hợp lệ, cô lập dữ liệu giữa các test, và chờ trạng thái sẵn sàng đúng cách.
+
+## Vì sao cần biết
+
+Nova Loyalty chạy trên PostgreSQL với các tính năng đặc thù và đồng bộ sự kiện qua Kafka 3.8. Hai thành phần này là nơi "test xanh, production đỏ" xảy ra nhiều nhất: query hợp lệ trên database nhúng nhưng sai dialect trên PostgreSQL, hành vi consumer chỉ lộ ra khi có broker thật. Testcontainers giải quyết bằng cách chạy đúng image Docker của PostgreSQL/Kafka trong lúc test, biến môi trường test thành bản sao trung thực của production mà vẫn tự động và huỷ được sau khi chạy. Với `@ServiceConnection`, Boot 3 biến việc nối container vào context thành một annotation, loại bỏ cả lớp mã nối dây dễ sai. Đây là năng lực bắt buộc để kiểm chứng các bài sau về N+1, đa datasource và Outbox trên nền tảng thật.
+
+## Nội dung chính
+
+### Testcontainers hoạt động thế nào
+
+Testcontainers là thư viện Java điều khiển Docker từ trong test: khởi động container từ image chỉ định, chờ container sẵn sàng theo chiến lược chờ, cung cấp địa chỉ/cổng đã map (cổng host được chọn ngẫu nhiên để tránh xung đột), và dọn container khi test kết thúc. Nguyên tắc vàng: không bao giờ giả định cổng cố định, luôn đọc thông tin kết nối từ chính container object sau khi nó khởi động.
+
+Thư viện có các module chuyên biệt như PostgreSQL và Kafka, cung cấp API tiện ích và chiến lược chờ mặc định phù hợp từng hệ thống — ví dụ chờ log sẵn sàng của broker thay vì chỉ chờ cổng mở, vì cổng mở không đồng nghĩa broker đã nhận được message.
+
+### ServiceConnection trong Spring Boot 3
+
+Từ Boot 3.1, một bean container được đánh dấu `@ServiceConnection` sẽ được Boot tự suy ra thông tin kết nối và nạp vào context test: với PostgreSQL container, Boot tạo cấu hình datasource từ JDBC URL của container; với Kafka container, Boot đặt thuộc tính bootstrap server tương ứng. Hai cách khai báo phổ biến:
+
+- Khai báo container là một `@Bean` static trong class cấu hình test kèm `@ServiceConnection`.
+- Dùng `@Testcontainers` với field container đánh dấu `@Container` và `@ServiceConnection` trên chính field.
+
+Nhờ vậy, code test không còn các đoạn tự ghép JDBC URL và thuộc tính bằng tay — nguồn lỗi cấu hình từng khiến test nối nhầm vào database mặc định.
+
+### Vòng đời và tái sử dụng container
+
+Container khởi động chậm hơn nhiều so với khởi động context, nên việc tổ chức vòng đời quyết định tốc độ cả bộ test:
+
+- Khai báo container ở mức dùng chung cho class/suite thay vì cho từng test method, trừ khi thật sự cần cô lập ở mức container.
+- Dữ liệu giữa các test được cô lập bằng transaction rollback, truncate có kiểm soát, hoặc schema/topic riêng, không phải bằng cách khởi động lại container.
+- Tái sử dụng container giữa các lần chạy (reuse) là tuỳ chọn cần bật rõ ràng cả phía thư viện lẫn phía môi trường, phù hợp cho vòng lặp phát triển tại máy cá nhân; trên CI, khởi động mới sạch thường được ưu tiên cho tính tái lập.
+
+### Kiểm chứng Kafka với broker thật
+
+Có broker thật, test có thể kiểm chứng đầu-cuối: publish một message, chờ consumer xử lý bằng cơ chế chờ có điều kiện (awaitility hoặc latch có timeout), rồi khẳng định trạng thái cuối. Tuyệt đối tránh `sleep` cố định: nó vừa làm test chậm, vừa vẫn không đảm bảo message đã được xử lý khi tải máy thay đổi.
+
+<Mermaid chart={`flowchart LR
+  A["Test khởi chạy"] --> B["Testcontainers bật PostgreSQL và Kafka"]
+  B --> C["ServiceConnection nạp thông tin kết nối vào context"]
+  C --> D["Test chạy trên hệ thống thật"]
+  D --> E["Container bị dọn khi suite kết thúc"]`} label="Vòng đời Testcontainers trong một test suite của Nova Loyalty: hệ thống thật được bật, nối tự động và dọn sạch." />
+
+## Code
+
+Cần các dependency ở phạm vi test trong `pom.xml`: `spring-boot-testcontainers`, `org.testcontainers:junit-jupiter`, `org.testcontainers:postgresql`, `org.testcontainers:kafka`, cùng `spring-boot-starter-test`.
+
+Khai báo hai container với `@ServiceConnection` và kiểm chứng repository trên PostgreSQL thật:
+
+```java filename=WalletRepositoryContainersTest.java
+package com.nova.loyalty.points;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.context.annotation.Import;
+import org.springframework.test.context.TestPropertySource;
+import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.kafka.KafkaContainer;
+import org.testcontainers.utility.DockerImageName;
+
+@DataJpaTest
+@Testcontainers
+@TestPropertySource(properties = "spring.jpa.hibernate.ddl-auto=create-drop")
+@Import(WalletRepositoryContainersTest.ContainersConfig.class)
+class WalletRepositoryContainersTest {
+
+    @org.springframework.boot.test.context.TestConfiguration
+    static class ContainersConfig {
+
+        @org.springframework.context.annotation.Bean
+        @ServiceConnection
+        PostgreSQLContainer<?> postgres() {
+            return new PostgreSQLContainer<>(DockerImageName.parse("postgres:16-alpine"));
+        }
+
+        @org.springframework.context.annotation.Bean
+        @ServiceConnection
+        KafkaContainer kafka() {
+            return new KafkaContainer(DockerImageName.parse("apache/kafka:3.8.0"));
+        }
+    }
+
+    @Autowired
+    private PointsWalletRepository walletRepository;
+
+    @Test
+    void persistsWalletOnRealPostgres() {
+        walletRepository.save(new PointsWallet(7L, 900L));
+
+        assertThat(walletRepository.findByMemberId(7L))
+                .isPresent()
+                .get()
+                .extracting(PointsWallet::getBalance)
+                .isEqualTo(900L);
+    }
+}
+```
+
+Kiểm chứng luồng Kafka đầu-cuối: gửi một sự kiện và chờ consumer ghi nhận bằng latch có timeout, không dùng ngủ cố định:
+
+```java filename=KafkaRoundTripTest.java
+package com.nova.loyalty.events;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.time.Duration;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.stereotype.Component;
+
+@SpringBootTest
+class KafkaRoundTripTest {
+
+    @Autowired
+    private KafkaTemplate<String, String> kafkaTemplate;
+
+    @Autowired
+    private RecordingListener listener;
+
+    @Test
+    void publishedEventIsConsumed() throws Exception {
+        kafkaTemplate.send("nova.points.changed", "42", "{\"memberId\":42,\"delta\":100}")
+                .get(10, TimeUnit.SECONDS);
+
+        boolean consumed = listener.await(Duration.ofSeconds(15));
+        assertThat(consumed).isTrue();
+        assertThat(listener.lastPayload()).contains("\"delta\":100");
+    }
+
+    @Component
+    static class RecordingListener {
+
+        private final CountDownLatch latch = new CountDownLatch(1);
+        private volatile String lastPayload;
+
+        @KafkaListener(topics = "nova.points.changed", groupId = "test-recorder")
+        void onMessage(String payload) {
+            this.lastPayload = payload;
+            latch.countDown();
+        }
+
+        boolean await(Duration timeout) throws InterruptedException {
+            return latch.await(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        }
+
+        String lastPayload() {
+            return lastPayload;
+        }
+    }
+}
+```
+
+> [!WARNING] Cần verify với docs version Testcontainers đang dùng thực tế: class container cho Kafka và tên image chính thức đã thay đổi qua các dòng phiên bản gần đây (module và image Apache Kafka mới thay cho các lựa chọn cũ); hãy đối chiếu tài liệu Testcontainers của đúng bản trong `pom.xml` trước khi sao chép khai báo container.
+
+## Sai lầm thường gặp
+
+### 1. Cố định cổng host cho container trong test
+
+- **Triệu chứng:** Test qua trên máy cá nhân nhưng xung đột cổng khi chạy song song hoặc trên CI.
+- **Nguyên nhân:** Giả định container luôn map vào cùng một cổng cố định thay vì đọc cổng đã map từ container object.
+- **Fix:** Luôn lấy địa chỉ kết nối động từ container hoặc để `@ServiceConnection` tự nạp thông tin.
+
+### 2. Ngủ cố định để chờ message được tiêu thụ
+
+- **Triệu chứng:** Test chập chờn: xanh khi máy rảnh, đỏ khi CI bận, và tổng thời gian chạy bị phình bởi các khoảng ngủ.
+- **Nguyên nhân:** `sleep` không gắn với điều kiện hoàn thành thật của luồng bất đồng bộ.
+- **Fix:** Chờ theo điều kiện bằng latch, `CompletableFuture` của lần gửi, hoặc thư viện chờ có timeout và polling.
+
+### 3. Khởi động lại container cho từng test method
+
+- **Triệu chứng:** Bộ test chậm hàng phút dù số test ít.
+- **Nguyên nhân:** Thời gian khởi động container bị trả lại ở mỗi test thay vì một lần cho cả class/suite.
+- **Fix:** Khai báo container dùng chung ở mức class, cô lập dữ liệu bằng rollback/truncate/topic riêng.
+
+### 4. Chỉ chờ cổng mở thay vì chờ hệ thống sẵn sàng
+
+- **Triệu chứng:** Test thỉnh thoảng lỗi kết nối ngay sau khi container khởi động dù cổng đã lắng nghe.
+- **Nguyên nhân:** Cổng mở trước khi broker/database hoàn tất khởi tạo nội bộ.
+- **Fix:** Dùng chiến lược chờ mặc định của module chuyên biệt hoặc khai báo chờ theo log/trạng thái sẵn sàng thật.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay (viết, vẽ sơ đồ, đọc code) — không có chấm tự động.
+
+1. **Viết code:** Viết một test dùng `@ServiceConnection` với PostgreSQL container kiểm chứng một ràng buộc `CHECK` đặc thù của PostgreSQL mà database nhúng không mô phỏng đúng.
+2. **Đọc code trả lời:** Đọc `KafkaRoundTripTest` ở mục Code: vì sao dùng `CountDownLatch` có timeout thay vì ngủ 5 giây? Nếu consumer xử lý xong trước khi test gọi `await` thì kết quả chờ ra sao?
+3. **Vẽ sơ đồ:** Vẽ timeline khởi động của một suite gồm 20 test dùng chung một container so với khởi động lại container từng test, ghi rõ chi phí phát sinh ở đâu.
+4. **Viết tay kế hoạch:** Viết kế hoạch cô lập dữ liệu cho một suite kiểm chứng Outbox trên PostgreSQL thật: chọn cơ chế rollback, truncate hay schema riêng và nêu đánh đổi của lựa chọn.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Boot — Testcontainers: https://docs.spring.io/spring-boot/reference/testing/testcontainers.html
+- Spring Boot — Testing: https://docs.spring.io/spring-boot/reference/testing/index.html
+- Apache Kafka — Documentation: https://kafka.apache.org/documentation/
+- Spring for Apache Kafka — Testing: https://docs.spring.io/spring-kafka/reference/testing.html
+
+## Đọc thêm
+
+Không có.

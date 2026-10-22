@@ -1,0 +1,207 @@
+---
+title: "HikariCP tuning: pool size, timeout và leak detection"
+module: 3
+level: "Senior"
+duration: 55
+order: 3
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Spring Data JPA 3.3.x", "Hibernate 6.5.x", "Micrometer 1.13.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Giải thích được mô hình pool của HikariCP: vì sao pool nhỏ thường thắng pool lớn, và công thức xuất phát điểm cho kích thước pool theo năng lực thật của database.
+- Cấu hình đúng các timeout cốt lõi: `connectionTimeout`, `maxLifetime`, `idleTimeout`, `keepaliveTime` và quan hệ của chúng với timeout phía database/mạng.
+- Bật và đọc được leak detection, cùng các metric pool qua Micrometer, để chẩn đoán cạn pool bằng bằng chứng thay vì tăng pool mù quáng.
+
+## Vì sao cần biết
+
+Nova Loyalty có 5 HikariCP datasource độc lập — core, gift, report, legacy, audit — trên cùng một hạ tầng database. Mỗi pool là một van: mở quá nhỏ, request xếp hàng chờ connection và timeout dây chuyền; mở quá lớn đồng loạt ở nhiều pod, tổng số connection vượt quá khả năng của database khiến mọi thứ chậm đi cùng lúc. Sự cố pool cũng là loại sự cố bị chẩn đoán sai nhiều nhất: thấy timeout lấy connection, phản ứng bản năng là tăng pool, trong khi gốc rễ thường là query chậm giữ connection lâu, leak không trả connection, hoặc một pool phụ như `report` chạy query nặng tranh chấp tài nguyên với `core`. Bài này cho khung tư duy và các con số cấu hình cụ thể để tune 5 pool này một cách có kỷ luật.
+
+## Nội dung chính
+
+### Pool là hàng đợi, không phải là sức mạnh
+
+Một connection chỉ làm được một việc tại một thời điểm. Số connection hữu ích bị chặn bởi năng lực thực thi đồng thời của database (CPU, I/O của storage), không phải bởi số request đồng thời của ứng dụng. Khi số connection vượt quá năng lực đó, các query tranh chấp nhau và latency của từng query tăng, giữ connection lâu hơn, làm hàng đợi dài thêm — vòng xoắn khiến pool lớn hơn lại chậm hơn. Xuất phát điểm kinh điển cho một database đơn lẻ thường là một pool khiêm tốn cho mỗi instance ứng dụng, rồi điều chỉnh bằng đo đạc: tổng connection của mọi pod nhân với kích thước pool phải nằm trong ngân sách connection mà database phục vụ tốt.
+
+### Các thông số cốt lõi và quan hệ giữa chúng
+
+- `maximumPoolSize`: số connection tối đa pool duy trì. Đây là trần đồng thời xuống database cho pool đó.
+- `minimumIdle`: số connection rỗi tối thiểu pool cố giữ. Với HikariCP, thực hành phổ biến là đặt bằng `maximumPoolSize` để pool có kích thước cố định, tránh dao động tạo/hủy connection.
+- `connectionTimeout`: thời gian tối đa một thread chờ lấy connection trước khi nhận exception. Đây là van bảo vệ: chờ có giới hạn và lỗi rõ ràng tốt hơn chờ vô hạn rồi sập dây chuyền.
+- `maxLifetime`: tuổi thọ tối đa của một connection trong pool, nên đặt thấp hơn thời gian sống tối đa phía database/mạng một khoảng an toàn, để pool chủ động thay connection trước khi phía dưới cắt đột ngột.
+- `idleTimeout`: thời gian một connection rỗi bị loại khi pool vượt mức tối thiểu; vô hiệu khi pool cố định theo cách đặt ở trên.
+- `keepaliveTime`: chu kỳ pool kiểm tra nhẹ các connection rỗi còn sống, hữu ích khi có tường lửa/mạng cắt kết nối im lặng — liên quan trực tiếp tới môi trường có SNAT ở các module sau.
+- `leakDetectionThreshold`: nếu một connection bị giữ lâu hơn ngưỡng này, HikariCP ghi log kèm stack trace của nơi lấy connection. Đây là công cụ chẩn đoán ở môi trường kiểm chứng, không phải cơ chế thu hồi.
+
+### Đọc triệu chứng đúng trước khi tune
+
+Cạn pool có ba gốc rễ khác nhau và ba cách chữa khác nhau: query chậm (connection bị giữ lâu bởi công việc thật), leak (connection không bao giờ được trả), và trần quá thấp so với đồng thời thật. Metric pool qua Micrometer cho các tín hiệu phân biệt: số connection đang hoạt động, số thread đang chờ lấy connection, thời gian chờ lấy connection. Thread chờ tăng trong khi connection hoạt động chưa chạm trần gợi ý sự cố khác; connection hoạt động chạm trần kèm thời gian giữ dài gợi ý query chậm; số connection hoạt động tăng đơn điệu không giảm gợi ý leak.
+
+### Năm pool tại Nova: ngân sách tổng thể
+
+Tune từng pool riêng lẻ là chưa đủ: ngân sách là tổng trên mọi pod. Một thay đổi "tăng pool core từ 10 lên 30" nhân với số pod đang chạy có thể cộng thêm hàng trăm connection vào cùng một database. Mọi thay đổi pool phải được tính ở quy mô fleet, gắn với giới hạn của database và có kế hoạch quan sát sau khi đổi: latency của query, số thread chờ và tỉ lệ timeout lấy connection trong cửa sổ sau triển khai.
+
+<Mermaid chart={`flowchart TD
+  A["Timeout lấy connection tăng"] --> B{"Connection đang dùng chạm trần?"}
+  B -->|"Chưa chạm trần"| C["Kiểm tra sự cố khác: pool bị đóng, DB không reachable"]
+  B -->|"Chạm trần"| D{"Thời gian giữ connection có dài bất thường?"}
+  D -->|"Dài"| E["Query chậm hoặc transaction treo - sửa gốc rễ"]
+  D -->|"Không giảm theo thời gian"| F["Nghi leak - bật leak detection truy stack trace"]
+  D -->|"Bình thường"| G["Cân nhắc tăng pool trong ngân sách tổng của fleet"]`} label="Cây chẩn đoán cạn pool: phân biệt query chậm, leak và trần thấp trước khi quyết định tăng pool." />
+
+## Code
+
+Cần dependency `spring-boot-starter-data-jpa` trong `pom.xml`; HikariCP là pool mặc định đi kèm. Metric pool được phơi qua Actuator/Micrometer khi bật gắn kết tương ứng.
+
+Cấu hình hai trong năm pool bằng properties, dùng tiền tố riêng cho từng datasource tự cấu hình ở bài sau:
+
+```properties filename=application.properties
+nova.datasource.core.jdbc-url=jdbc:postgresql://core-db:5432/nova_core
+nova.datasource.core.maximum-pool-size=20
+nova.datasource.core.minimum-idle=20
+nova.datasource.core.connection-timeout=5000
+nova.datasource.core.max-lifetime=1200000
+nova.datasource.core.keepalive-time=120000
+nova.datasource.core.leak-detection-threshold=60000
+nova.datasource.report.jdbc-url=jdbc:postgresql://report-db:5432/nova_report
+nova.datasource.report.maximum-pool-size=10
+nova.datasource.report.minimum-idle=10
+nova.datasource.report.connection-timeout=3000
+nova.datasource.report.max-lifetime=1200000
+nova.datasource.report.keepalive-time=120000
+management.metrics.enable.hikaricp=true
+```
+
+Dựng một pool bằng code để kiểm soát đầy đủ, ví dụ cho datasource `legacy` nối tới hệ Java 11 cũ:
+
+```java filename=LegacyDataSourceConfig.java
+package com.nova.loyalty.config;
+
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class LegacyDataSourceConfig {
+
+    @Bean(destroyMethod = "close")
+    public HikariDataSource legacyDataSource() {
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl("jdbc:postgresql://legacy-db:5432/nova_legacy");
+        config.setUsername("nova_app");
+        config.setPassword(System.getenv("LEGACY_DB_PASSWORD"));
+        config.setPoolName("nova-legacy-pool");
+        config.setMaximumPoolSize(8);
+        config.setMinimumIdle(8);
+        config.setConnectionTimeout(4_000);
+        config.setMaxLifetime(1_200_000);
+        config.setKeepaliveTime(120_000);
+        config.setLeakDetectionThreshold(60_000);
+        return new HikariDataSource(config);
+    }
+}
+```
+
+Đọc metric chờ lấy connection trong một health/signal component để cảnh báo sớm (đơn giản hoá: đọc qua `MeterRegistry`):
+
+```java filename=PoolWaitMonitor.java
+package com.nova.loyalty.config;
+
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import java.time.Duration;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+
+@Component
+public class PoolWaitMonitor {
+
+    private static final Logger log = LoggerFactory.getLogger(PoolWaitMonitor.class);
+    private static final Duration WAIT_P99_BUDGET = Duration.ofMillis(50);
+
+    private final MeterRegistry registry;
+
+    public PoolWaitMonitor(MeterRegistry registry) {
+        this.registry = registry;
+    }
+
+    @Scheduled(fixedDelay = 60_000)
+    public void checkAcquisitionWait() {
+        Timer timer = registry.find("hikaricp.connections.acquire").timer();
+        if (timer == null) {
+            return;
+        }
+        double p99Millis = 0.0d;
+        for (var valueAtPercentile : timer.takeSnapshot().percentileValues()) {
+            if (valueAtPercentile.percentile() == 0.99d) {
+                p99Millis = valueAtPercentile.value(java.util.concurrent.TimeUnit.MILLISECONDS);
+            }
+        }
+        if (p99Millis > WAIT_P99_BUDGET.toMillis()) {
+            log.warn("Pool acquisition p99 {} ms vượt ngân sách {} ms", p99Millis, WAIT_P99_BUDGET.toMillis());
+        }
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Tăng pool để chữa timeout lấy connection
+
+- **Triệu chứng:** Sau khi tăng pool, timeout giảm vài ngày rồi quay lại nặng hơn, kèm latency của database tăng toàn diện.
+- **Nguyên nhân:** Gốc rễ là query chậm hoặc leak giữ connection; tăng pool chỉ hoãn triệu chứng và tăng tranh chấp trong database.
+- **Fix:** Chẩn đoán theo cây quyết định: kiểm tra thời gian giữ connection và leak trước, chỉ tăng pool khi đã chứng minh trần là nút thắt và còn ngân sách fleet.
+
+### 2. Đặt maxLifetime cao hơn giới hạn phía database hoặc mạng
+
+- **Triệu chứng:** Lỗi connection đã đóng xuất hiện ngẫu nhiên, đặc biệt sau các khoảng im lặng hoặc sau bảo trì mạng.
+- **Nguyên nhân:** Phía dưới cắt connection trước khi pool thay mới; pool phát cho ứng dụng một connection đã chết.
+- **Fix:** Đặt `maxLifetime` thấp hơn giới hạn dưới nhất một khoảng an toàn, kèm `keepaliveTime` cho các connection rỗi.
+
+### 3. Bật leak detection ở production nhưng không ai đọc log
+
+- **Triệu chứng:** Log đầy cảnh báo connection leak nhưng sự cố vẫn lặp lại ở cùng một điểm trong code.
+- **Nguyên nhân:** Leak detection chỉ ghi log kèm stack trace; nó không tự thu hồi connection hay sửa code quên đóng tài nguyên.
+- **Fix:** Dùng leak detection ở môi trường kiểm chứng để truy ra nơi lấy connection không trả, sửa bằng try-with-resources hoặc để framework quản lý, và đặt cảnh báo trên tín hiệu này nếu bật ở production.
+
+### 4. Quên nhân kích thước pool với số pod
+
+- **Triệu chứng:** Database chạm trần connection tổng thể mỗi lần scale out dù từng pod riêng lẻ cấu hình "có vẻ nhỏ".
+- **Nguyên nhân:** Ngân sách connection là của cả fleet: tổng bằng kích thước pool nhân số pod, cộng mọi pool khác trên cùng database.
+- **Fix:** Tính ngân sách ở quy mô fleet trước khi đổi cấu hình, ghi con số tổng vào tài liệu vận hành của từng pool.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay (viết, vẽ sơ đồ, đọc code) — không có chấm tự động.
+
+1. **Viết tay tính toán:** Cho một fleet 6 pod, mỗi pod có 5 pool với kích thước lần lượt 20, 10, 10, 8, 5: tính tổng connection tối đa xuống từng database tương ứng khi các pool trỏ về 3 database vật lý tự giả định, và nhận xét mức độ an toàn.
+2. **Đọc code trả lời:** Đọc `LegacyDataSourceConfig` ở mục Code: giải thích vai trò của từng thông số thời gian và điều gì xảy ra nếu `maxLifetime` đặt cao hơn giới hạn 25 phút phía database.
+3. **Vẽ sơ đồ:** Vẽ đường cong latency theo kích thước pool cho một database cố định, đánh dấu vùng pool quá nhỏ, vùng tối ưu và vùng quá lớn, kèm cơ chế vật lý của từng vùng.
+4. **Viết code:** Viết một đoạn kiểm chứng chủ động (test hoặc job chẩn đoán) cố ý giữ một connection quá ngưỡng leak detection trong môi trường kiểm chứng và mô tả log kỳ vọng để khẳng định cơ chế phát hiện hoạt động.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Boot — DataSource và HikariCP: https://docs.spring.io/spring-boot/reference/data/sql.html
+- Spring Boot — Metrics cho DataSource: https://docs.spring.io/spring-boot/reference/actuator/metrics.html
+- Micrometer — Meter và Timer: https://docs.micrometer.io/micrometer/reference/concepts.html
+- Spring Framework — JDBC và quản lý tài nguyên: https://docs.spring.io/spring-framework/reference/data-access/jdbc.html
+
+## Đọc thêm
+
+Không có.

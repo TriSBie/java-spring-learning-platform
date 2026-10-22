@@ -1,0 +1,209 @@
+---
+title: "Sealed interfaces và pattern matching cho switch"
+module: 1
+level: "Middle"
+duration: 45
+order: 2
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Kafka 3.8"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Khai báo được `sealed interface` với danh sách `permits` đầy đủ và chọn đúng modifier `final`, `sealed`, `non-sealed` cho từng subtype.
+- Viết được `switch` expression dùng pattern matching xử lý triệt để (exhaustive) mọi subtype mà không cần nhánh `default`.
+- Refactor được một chuỗi `instanceof` dài thành pattern matching an toàn, và giải thích được lợi ích khi thêm loại sự kiện mới.
+
+## Vì sao cần biết
+
+Ở Nova Loyalty, điểm có 3 nguồn ví và mỗi giao dịch sinh ra một loại sự kiện khác nhau: cộng điểm mua hàng, cộng điểm khuyến mãi, trừ điểm đổi quà, hoàn điểm, điểm hết hạn. Các sự kiện này chảy qua Outbox rồi sang Kafka để CRM đồng bộ. Nếu mô hình sự kiện là một interface mở với các class rải rác, một lập trình viên có thể thêm loại sự kiện mới mà quên cập nhật nơi xử lý ở CRM consumer — sự kiện rơi vào nhánh `default` và biến mất lặng lẽ, số dư CRM lệch mà không có lỗi nào. `sealed interface` khoá tập subtype thành một danh sách kín do compiler kiểm soát: thêm subtype mới là mọi `switch` chưa xử lý subtype đó sẽ lỗi biên dịch ngay, buộc phải xử lý có ý thức.
+
+## Nội dung chính
+
+### Sealed class và interface
+
+Từ Java 17, `sealed` cho phép một class hoặc interface giới hạn những type nào được kế thừa/trực tiếp implements nó. Danh sách được khai báo bằng mệnh đề `permits`. Mỗi subtype trực tiếp bắt buộc chọn một trong ba modifier:
+
+- `final`: không cho kế thừa tiếp, là lá của cây phân cấp.
+- `sealed`: tiếp tục giới hạn các subtype của chính nó bằng `permits` riêng.
+- `non-sealed`: mở lại hoàn toàn, ai cũng kế thừa được — dùng có chủ đích và hiếm.
+
+Các subtype phải nằm cùng package (hoặc cùng module nếu dùng JPMS) với type cha. Compiler nắm toàn bộ cây phân cấp nên mới suy luận được tính exhaustive cho `switch`.
+
+### Pattern matching cho switch trong Java 21
+
+Java 21 hoàn thiện pattern matching cho `switch` (JEP 441): mỗi `case` có thể khai báo một pattern kèm biến binding, ví dụ `case PointsEarned e -> ...`. Các tính năng đi kèm:
+
+- Kiểm tra `null` tường minh bằng `case null`.
+- Guard bằng mệnh đề `when`, ví dụ chỉ khớp khi số điểm lớn hơn ngưỡng.
+- Thứ tự case quan trọng: pattern tổng quát hơn đặt trước sẽ che pattern cụ thể phía sau, compiler báo lỗi unreachable.
+- Khi selector là sealed type và mọi subtype đã được xử lý, `switch` là exhaustive mà không cần `default`.
+
+Kết hợp `record` làm subtype: pattern có thể deconstruct trực tiếp component của record trong cùng một `case` (record patterns, JEP 440), lấy ra các trường cần dùng mà không cần gọi accessor thủ công.
+
+### Exhaustiveness là hợp đồng với tương lai
+
+Giá trị lớn nhất không nằm ở code ngắn hơn hôm nay, mà ở lần thay đổi sau: khi thêm `PointsExpired` vào `permits`, mọi `switch` trên `PointsEvent` trong codebase đều lỗi biên dịch cho tới khi xử lý subtype mới. Lỗi lúc compile rẻ hơn rất nhiều so với sự kiện bị nuốt lặng lẽ lúc runtime ở hệ thống CRM.
+
+Ngược lại, việc thêm nhánh `default` "cho chắc" sẽ vô hiệu hoá hợp đồng này. Chỉ dùng `default` khi selector không phải sealed type, hoặc khi hành vi mặc định thật sự có ý nghĩa nghiệp vụ và đã được cân nhắc.
+
+<Mermaid chart={`flowchart TD
+  A["PointsEvent - sealed interface"] --> B["PointsEarned - record final"]
+  A --> C["PointsRedeemed - record final"]
+  A --> D["PointsRefunded - record final"]
+  A --> E["PointsExpired - record final"]
+  B --> F["switch xử lý exhaustive"]
+  C --> F
+  D --> F
+  E --> F`} label="Cây phân cấp kín của PointsEvent tại Nova Loyalty: compiler biết toàn bộ subtype nên switch không cần default vẫn exhaustive." />
+
+### Khi nào không nên sealed
+
+Sealed phù hợp khi tập subtype thuộc về cùng một miền nghiệp vụ và do một team kiểm soát, ví dụ sự kiện điểm, trạng thái giao dịch, kết quả thanh toán. Không nên sealed cho các type được thiết kế để bên thứ ba mở rộng (plugin SPI) hoặc khi subtype nằm rải rác ở nhiều module độc lập không thể liệt kê trước.
+
+## Code
+
+Không cần thêm dependency ngoài `spring-boot-starter` cho phần model sự kiện thuần Java dưới đây.
+
+Mô hình sự kiện kín bằng sealed interface và các record subtype:
+
+```java filename=PointsEvent.java
+package com.nova.loyalty.points.event;
+
+import java.time.Instant;
+import java.util.Objects;
+
+public sealed interface PointsEvent
+        permits PointsEvent.PointsEarned,
+                PointsEvent.PointsRedeemed,
+                PointsEvent.PointsRefunded,
+                PointsEvent.PointsExpired {
+
+    Long memberId();
+
+    Instant occurredAt();
+
+    record PointsEarned(Long memberId, long amount, String walletSource, Instant occurredAt)
+            implements PointsEvent {
+        public PointsEarned {
+            Objects.requireNonNull(memberId, "memberId must not be null");
+            if (amount <= 0) {
+                throw new IllegalArgumentException("amount must be positive");
+            }
+        }
+    }
+
+    record PointsRedeemed(Long memberId, long amount, String giftId, Instant occurredAt)
+            implements PointsEvent {
+        public PointsRedeemed {
+            Objects.requireNonNull(giftId, "giftId must not be null");
+            if (amount <= 0) {
+                throw new IllegalArgumentException("amount must be positive");
+            }
+        }
+    }
+
+    record PointsRefunded(Long memberId, long amount, String originalTxId, Instant occurredAt)
+            implements PointsEvent {
+    }
+
+    record PointsExpired(Long memberId, long amount, Instant occurredAt)
+            implements PointsEvent {
+    }
+}
+```
+
+Handler dùng switch exhaustive kèm record pattern và guard:
+
+```java filename=PointsEventHandler.java
+package com.nova.loyalty.points.event;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
+
+@Component
+public class PointsEventHandler {
+
+    private static final Logger log = LoggerFactory.getLogger(PointsEventHandler.class);
+    private static final long LARGE_EARN_THRESHOLD = 10_000L;
+
+    public String describe(PointsEvent event) {
+        return switch (event) {
+            case null -> "no event";
+            case PointsEvent.PointsEarned e when e.amount() >= LARGE_EARN_THRESHOLD ->
+                    "large earn for member " + e.memberId() + " from " + e.walletSource();
+            case PointsEvent.PointsEarned e ->
+                    "earn " + e.amount() + " for member " + e.memberId();
+            case PointsEvent.PointsRedeemed r ->
+                    "redeem " + r.amount() + " for gift " + r.giftId();
+            case PointsEvent.PointsRefunded r ->
+                    "refund " + r.amount() + " of tx " + r.originalTxId();
+            case PointsEvent.PointsExpired x ->
+                    "expire " + x.amount() + " for member " + x.memberId();
+        };
+    }
+
+    public void logEvent(PointsEvent event) {
+        log.info("Points event handled: {}", describe(event));
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Thêm nhánh default vào switch trên sealed type
+
+- **Triệu chứng:** Thêm subtype mới nhưng không nơi nào báo lỗi; sự kiện mới bị xử lý theo hành vi mặc định sai nghiệp vụ.
+- **Nguyên nhân:** `default` làm switch luôn exhaustive về mặt cú pháp, compiler không còn kiểm tra được tính đầy đủ theo subtype.
+- **Fix:** Bỏ `default` cho switch trên sealed type; để compiler buộc xử lý từng subtype.
+
+### 2. Quên khai báo modifier cho subtype
+
+- **Triệu chứng:** Lỗi biên dịch báo subtype của sealed type phải là `final`, `sealed` hoặc `non-sealed`.
+- **Nguyên nhân:** Mọi subtype trực tiếp của sealed type đều phải tuyên bố rõ nó đóng hay mở tiếp cây phân cấp.
+- **Fix:** Chọn `final` cho record/lá, `sealed` nếu còn chia nhỏ, `non-sealed` chỉ khi thật sự muốn mở rộng tự do.
+
+### 3. Đặt case tổng quát lên trước case cụ thể
+
+- **Triệu chứng:** Compiler báo case không tới được (unreachable), hoặc guard không bao giờ chạy.
+- **Nguyên nhân:** Pattern matching khớp theo thứ tự từ trên xuống; pattern ít điều kiện hơn che mất pattern phía sau.
+- **Fix:** Sắp xếp case có guard và case cụ thể trước case tổng quát cùng loại.
+
+### 4. Dùng sealed cho type cần bên thứ ba mở rộng
+
+- **Triệu chứng:** Đối tác không thể implements interface vì không nằm trong danh sách `permits`.
+- **Nguyên nhân:** Sealed cố ý đóng tập subtype; dùng sai chỗ sẽ chặn đúng khả năng mở rộng cần thiết.
+- **Fix:** Chỉ sealed các miền do team kiểm soát toàn bộ; để interface mở cho SPI/plugin.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay (viết, vẽ sơ đồ, đọc code) — không có chấm tự động.
+
+1. **Viết code:** Khai báo sealed interface `WalletResult` với 3 subtype: thành công kèm số dư mới, thất bại vì thiếu điểm, thất bại vì trùng `idempotencyKey`. Chọn modifier đúng cho từng subtype.
+2. **Đọc code trả lời:** Đọc `describe` ở mục Code: nếu bỏ case `PointsExpired` thì compiler báo gì, và vì sao việc đó là mong muốn? Nếu thêm nhánh `default` thì hành vi compiler thay đổi thế nào?
+3. **Vẽ sơ đồ:** Vẽ cây phân cấp `PointsEvent` và một cây con `sealed` lồng bên trong một subtype tự chọn, ghi rõ `permits` ở từng tầng.
+4. **Viết tay refactor:** Viết lại một chuỗi `if` / `instanceof` gồm 5 nhánh (tự nghĩ một ví dụ xử lý trạng thái đơn hàng) thành switch pattern matching, nêu một rủi ro biến mất sau khi refactor.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- JEP 409 — Sealed Classes: https://openjdk.org/jeps/409
+- JEP 441 — Pattern Matching for switch: https://openjdk.org/jeps/441
+- JEP 440 — Record Patterns: https://openjdk.org/jeps/440
+- Dev.java — Sealed Classes: https://dev.java/learn/language-basics/
+
+## Đọc thêm
+
+Không có.

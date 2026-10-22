@@ -1,0 +1,204 @@
+---
+title: "Records và dữ liệu bất biến trong Java 21"
+module: 1
+level: "Junior"
+duration: 35
+order: 1
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Khai báo được `record` với compact constructor để validate dữ liệu ngay tại điểm tạo object, ném exception rõ ràng khi dữ liệu không hợp lệ.
+- Phân biệt được khi nào dùng `record` cho DTO và khi nào vẫn cần class thường hoặc JPA entity có setter có kiểm soát.
+- Áp dụng được `record` làm request/response DTO cho một points API, gồm cả việc copy dữ liệu bất biến bằng cách tạo instance mới.
+
+## Vì sao cần biết
+
+Ở Nova Loyalty, API điểm nhận request cộng/trừ điểm qua gateway theo các route `/v4/{gs,os,ws}/*`. Mỗi request mang `memberId`, `delta`, `source` (một trong 3 nguồn ví) và `idempotencyKey`. Nếu DTO là class mutable với setter công khai, bất kỳ đoạn code nào giữ reference cũng có thể sửa `delta` sau khi đã validate, khiến logic CAS update ở tầng service cộng sai số điểm mà log không hề ghi lại lần sửa đó. Dùng `record` bất biến cho DTO giúp dữ liệu đã validate thì không đổi được nữa: muốn thay đổi phải tạo instance mới và validate lại từ đầu. Đây là nền tảng để các bài sau về sealed types, pattern matching và idempotency đứng vững.
+
+## Nội dung chính
+
+### Record là gì
+
+`record` là một loại class đặc biệt trong Java, được thiết kế để làm vật chứa dữ liệu bất biến (immutable data carrier). Khi khai báo các component trong header, compiler tự sinh ra:
+
+- Các field `private final` tương ứng với từng component.
+- Canonical constructor nhận đủ mọi component.
+- Accessor method mang tên đúng component, ví dụ `memberId()`, không có tiền tố `get`.
+- Phương thức `equals`, `hashCode` và `toString` dựa trên toàn bộ component.
+- Không có setter, và record là `final` nên không kế thừa được.
+
+Nhờ vậy, một DTO trước đây cần vài chục dòng boilerplate nay chỉ còn vài dòng, và ý định "đây là dữ liệu bất biến" được thể hiện ngay trong khai báo.
+
+### Compact constructor và validation
+
+Compact constructor là dạng constructor rút gọn không có danh sách tham số: bên trong nó, các component đã được gán vào parameter ngầm định, và ở cuối khối, compiler tự gán parameter vào field. Đây là nơi đặt validation:
+
+- Kiểm tra null bằng `Objects.requireNonNull`.
+- Kiểm tra miền giá trị, ví dụ `delta` khác 0, số điểm không âm.
+- Chuẩn hoá dữ liệu, ví dụ trim chuỗi hoặc copy collection thành bản bất biến bằng `List.copyOf`.
+
+Nếu validation ném exception, object không bao giờ được tạo ra. Bất biến (invariant) của kiểu dữ liệu vì thế luôn đúng với mọi instance đang tồn tại — người đọc code không cần kiểm tra lại ở mỗi nơi sử dụng.
+
+### Record không tự làm dữ liệu sâu trở nên bất biến
+
+Record chỉ đảm bảo các field không bị gán lại (shallow immutability). Nếu một component là `List` mutable mà caller truyền vào rồi sau đó tự sửa list gốc, nội dung bên trong record vẫn thay đổi theo. Cách xử lý chuẩn là copy phòng thủ trong compact constructor bằng `List.copyOf`, `Set.copyOf` hoặc `Map.copyOf`. Các bản copy này cũng đồng thời từ chối phần tử null, giúp phát hiện lỗi sớm.
+
+### Record làm DTO trong Spring Boot 3
+
+Spring Boot 3.3.x và Jackson đi kèm hỗ trợ record trọn vẹn: Jackson serialize/deserialize qua canonical constructor và accessor, Spring MVC bind request body vào record mà không cần setter. Record đặc biệt hợp cho:
+
+- Request/response DTO của REST API.
+- Value object trong domain, ví dụ `Money`, `PointsAmount`.
+- Kết quả truy vấn nội bộ, event payload.
+
+Ngược lại, JPA entity thường không nên là record vì Hibernate cần constructor không tham số, proxy và khả năng mutate có kiểm soát khi entity ở trạng thái managed. Hãy để entity là class thường, và map sang record ở biên của service/API.
+
+<Mermaid chart={`flowchart LR
+  A["Client gửi JSON"] --> B["Jackson bind vào record DTO"]
+  B --> C["Compact constructor validate"]
+  C -->|"hợp lệ"| D["Service xử lý CAS update"]
+  C -->|"không hợp lệ"| E["Exception - trả 400"]
+  D --> F["Map sang response record"]`} label="Luồng DTO record tại Nova Loyalty: dữ liệu được validate ngay khi bind, instance hợp lệ là bất biến trong suốt quá trình xử lý." />
+
+### Copy thay vì sửa
+
+Với dữ liệu bất biến, "sửa" nghĩa là tạo instance mới mang giá trị mới, thường qua một method hỗ trợ kiểu `withDelta(...)`. Cách này làm luồng dữ liệu dễ truy vết: instance cũ vẫn giữ nguyên cho log/audit, instance mới thể hiện trạng thái sau thay đổi, không có sửa đổi ẩn ở giữa.
+
+## Code
+
+Cần dependency `spring-boot-starter-web` trong `pom.xml` để có Spring MVC và Jackson hỗ trợ record.
+
+DTO cho points API, validate đầy đủ trong compact constructor và copy phòng thủ cho danh sách tag:
+
+```java filename=ChangePointsRequest.java
+package com.nova.loyalty.points.api;
+
+import java.util.List;
+import java.util.Objects;
+
+public record ChangePointsRequest(
+        Long memberId,
+        long delta,
+        String walletSource,
+        String idempotencyKey,
+        List<String> tags) {
+
+    public ChangePointsRequest {
+        Objects.requireNonNull(memberId, "memberId must not be null");
+        Objects.requireNonNull(walletSource, "walletSource must not be null");
+        Objects.requireNonNull(idempotencyKey, "idempotencyKey must not be null");
+        if (delta == 0) {
+            throw new IllegalArgumentException("delta must not be zero");
+        }
+        if (idempotencyKey.isBlank()) {
+            throw new IllegalArgumentException("idempotencyKey must not be blank");
+        }
+        tags = tags == null ? List.of() : List.copyOf(tags);
+    }
+
+    public ChangePointsRequest withDelta(long newDelta) {
+        return new ChangePointsRequest(memberId, newDelta, walletSource, idempotencyKey, tags);
+    }
+}
+```
+
+Response record và controller dùng record ở cả hai chiều:
+
+```java filename=PointsController.java
+package com.nova.loyalty.points.api;
+
+import jakarta.validation.Valid;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/v4/gs/points")
+public class PointsController {
+
+    private final PointsBalanceService balanceService;
+
+    public PointsController(PointsBalanceService balanceService) {
+        this.balanceService = balanceService;
+    }
+
+    @PostMapping("/{memberId}/change")
+    public ResponseEntity<PointsBalanceResponse> change(
+            @PathVariable Long memberId,
+            @Valid @RequestBody ChangePointsRequest request) {
+        if (!memberId.equals(request.memberId())) {
+            throw new IllegalArgumentException("memberId in path and body must match");
+        }
+        long balance = balanceService.changePoints(request);
+        PointsBalanceResponse response = new PointsBalanceResponse(
+                request.memberId(), balance, request.walletSource());
+        return ResponseEntity.ok(response);
+    }
+
+    public record PointsBalanceResponse(Long memberId, long balanceAfter, String walletSource) {
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Để collection mutable lọt vào record
+
+- **Triệu chứng:** Dữ liệu trong record thay đổi dù không có dòng code nào gán lại field.
+- **Nguyên nhân:** Component là `List` hoặc `Map` mutable do caller truyền vào; record chỉ bất biến ở tầng field.
+- **Fix:** Copy phòng thủ trong compact constructor bằng `List.copyOf`, `Set.copyOf`, `Map.copyOf`.
+
+### 2. Dùng record làm JPA entity
+
+- **Triệu chứng:** Hibernate không khởi tạo được entity, hoặc phải hack reflection để gán field.
+- **Nguyên nhân:** Record là `final`, không có constructor không tham số và không cho phép mutate có kiểm soát.
+- **Fix:** Entity giữ là class thường; map entity sang record DTO ở biên service/controller.
+
+### 3. Validate rải rác khắp nơi thay vì ở compact constructor
+
+- **Triệu chứng:** Cùng một rule kiểm tra `delta` được viết lặp ở controller, service và consumer; một nơi quên kiểm tra là dữ liệu rác lọt vào.
+- **Nguyên nhân:** Không tận dụng điểm tạo object duy nhất mà record cung cấp.
+- **Fix:** Đưa mọi invariant của kiểu dữ liệu vào compact constructor; tầng trên chỉ xử lý rule phụ thuộc ngữ cảnh nghiệp vụ.
+
+### 4. Cố sửa record bằng cách thêm setter thủ công
+
+- **Triệu chứng:** Code không biên dịch được, hoặc xuất hiện field phụ mutable làm mất ý nghĩa bất biến.
+- **Nguyên nhân:** Nhầm record với class DTO thông thường.
+- **Fix:** Tạo instance mới bằng method kiểu `withX(...)`; nếu nhu cầu mutate là thật, đó là dấu hiệu nên dùng class thường.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay (viết, vẽ sơ đồ, đọc code) — không có chấm tự động.
+
+1. **Viết code:** Viết record `RedeemGiftRequest` cho nghiệp vụ đổi quà gồm `memberId`, `giftId`, `pointsCost`, `idempotencyKey`; validate trong compact constructor: mọi id không null, `pointsCost` lớn hơn 0.
+2. **Đọc code trả lời:** Đọc `ChangePointsRequest` ở mục Code và trả lời: nếu caller truyền `tags` là một `ArrayList` rồi sau đó thêm phần tử vào list gốc, record có bị ảnh hưởng không? Vì sao?
+3. **Vẽ sơ đồ:** Vẽ luồng một request đổi điểm đi qua gateway `/v4/{gs,os,ws}/*` tới controller, đánh dấu vị trí record được tạo và vị trí validation chạy.
+4. **Viết tay phân tích:** Liệt kê 3 kiểu dữ liệu trong một hệ loyalty bạn biết nên là record và 2 kiểu không nên, kèm lý do cho từng kiểu.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Dev.java — Records: https://dev.java/learn/records/
+- JEP 395 — Records: https://openjdk.org/jeps/395
+- Spring Boot — REST API và Jackson: https://docs.spring.io/spring-boot/reference/web/servlet.html
+
+## Đọc thêm
+
+Không có.

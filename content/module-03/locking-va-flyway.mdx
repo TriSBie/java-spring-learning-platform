@@ -1,0 +1,207 @@
+---
+title: "Locking: optimistic, pessimistic và Flyway migrations"
+module: 3
+level: "Middle"
+duration: 50
+order: 5
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Spring Data JPA 3.3.x", "Hibernate 6.5.x", "Flyway 10.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Phân biệt được optimistic locking bằng `@Version` và pessimistic locking qua `@Lock`, chọn đúng cơ chế theo mức tranh chấp và độ dài của đơn vị công việc.
+- Xử lý đúng `OptimisticLockException`: thử lại có giới hạn cho thao tác ngắn, hoặc trả xung đột rõ ràng cho người dùng.
+- Viết được Flyway migration đúng quy ước đặt tên với version 14 chữ số theo thời gian, hiểu checksum và nguyên tắc không sửa migration đã áp dụng.
+
+## Vì sao cần biết
+
+Ví điểm của Nova Loyalty là điểm nóng tranh chấp thật sự: cùng một hội viên có thể được cộng điểm từ giao dịch mua hàng, điểm khuyến mãi theo chiến dịch và điểm hoàn, gần như đồng thời, từ các nguồn ví khác nhau. Nếu hai transaction cùng đọc số dư 1000 rồi cùng ghi 1100, một lần cộng bị mất (lost update) mà không lỗi nào xuất hiện. Kiểm soát đồng thời ở tầng dữ liệu là lớp bảo vệ cuối cùng dưới CAS của tầng nghiệp vụ. Cùng bài này là Flyway: với 5 database độc lập, schema của từng database tiến hoá bằng các migration có thứ tự và checksum — một migration bị sửa sau khi đã chạy ở production có thể làm mọi pod mới từ chối khởi động. Hai chủ đề gặp nhau ở một điểm: cả hai đều là kỷ luật để nhiều người và nhiều tiến trình cùng thay đổi một trạng thái dùng chung mà không dẫm lên nhau.
+
+## Nội dung chính
+
+### Optimistic locking bằng @Version
+
+Optimistic locking giả định tranh chấp là hiếm: không khóa khi đọc, nhưng lúc ghi, Hibernate kiểm tra cột version vẫn bằng giá trị lúc đọc — bằng một điều kiện trong câu cập nhật — rồi tăng version. Nếu version đã đổi, câu cập nhật chạm 0 dòng và Hibernate ném ngoại lệ optimistic lock phía ứng dụng. Đặc tính:
+
+- Không giữ khóa database trong lúc xử lý, thông lượng cao khi tranh chấp thấp.
+- Xung đột được phát hiện muộn, ở thời điểm ghi; nghiệp vụ phải quyết định thử lại toàn bộ đơn vị công việc hay báo xung đột.
+- Hoạt động xuyên suốt thời gian ngắt quãng dài (đọc ở request này, ghi ở request sau) vì version đi cùng dữ liệu.
+- Thử lại phải làm lại từ bước đọc, trong một transaction mới, với số lần giới hạn và cân nhắc độ trễ tăng dần.
+
+### Pessimistic locking qua @Lock
+
+Pessimistic locking lấy khóa thật của database ngay khi đọc (`SELECT ... FOR UPDATE` và các biến thể), giữ tới cuối transaction. Các mode chính qua annotation `@Lock` trên method repository: đọc có khóa ghi, đọc có khóa đọc, và các biến thể không chờ. Đặc tính:
+
+- Xung đột được ngăn chặn trước: transaction sau chờ hoặc thất bại ngay tuỳ mode, không mất công việc đã làm.
+- Khóa giữ lâu làm giảm đồng thời và có nguy cơ deadlock nếu thứ tự lấy khóa giữa các transaction không nhất quán.
+- Chỉ có ý nghĩa trong một transaction liên tục; không bảo vệ được các chỉnh sửa ngắt quãng qua nhiều request.
+- Độ dài transaction phải ngắn và có kỷ luật thứ tự khóa (luôn khóa theo cùng thứ tự id) để kiểm soát deadlock.
+
+Quy tắc chọn: mặc định optimistic cho hầu hết luồng nghiệp vụ; pessimistic chỉ cho các đoạn ngắn, tranh chấp cao, nơi chi phí làm lại khi xung đột lớn hơn chi phí chờ khóa — ví dụ trừ kho giới hạn của một quà tặng sắp hết trong một transaction ngắn.
+
+### Flyway: migration có version, thứ tự và checksum
+
+Flyway quản lý schema bằng các file migration SQL được đánh version, chạy theo thứ tự tăng dần, mỗi migration chạy đúng một lần và được ghi lại trong bảng lịch sử schema kèm một checksum của nội dung file. Các quy ước của Nova:
+
+- Tên file theo mẫu versioned migration: chữ `V`, tiếp theo là version, hai dấu gạch dưới, rồi mô tả ngắn bằng chữ thường ngăn cách gạch dưới, kết thúc bằng đuôi `.sql`.
+- Version dùng 14 chữ số theo thời gian `yyyyMMddHHmmss` — ví dụ một file tạo lúc 10:30 ngày 22/10/2026 mang version `20261022103000` — để các nhánh phát triển song song gần như không bao giờ trùng version và thứ tự vẫn phản ánh thời gian tạo.
+- Migration đã áp dụng ở bất kỳ môi trường chung nào là bất biến: cần thay đổi thì viết migration mới tiếp theo. Sửa nội dung file cũ làm checksum lệch, Flyway từ chối chạy và ứng dụng không khởi động được — đó là hành vi bảo vệ có chủ đích.
+- Mỗi database trong 5 database có bộ migration và bảng lịch sử riêng; một thay đổi schema xuyên nhiều database là nhiều migration độc lập được điều phối ở tầng phát hành, không phải một migration chung.
+
+<Mermaid chart={`flowchart LR
+  A["V20261022103000__create_points_wallet.sql"] --> B["V20261022104500__add_idempotency_key.sql"]
+  B --> C["V20261023090000__create_outbox_event.sql"]
+  C --> D["Bảng lịch sử schema ghi version và checksum"]`} label="Chuỗi migration Flyway của database core tại Nova Loyalty: version 14 chữ số theo thời gian, chạy đúng một lần theo thứ tự tăng dần." />
+
+### Kết hợp hai chủ đề trong một thay đổi thật
+
+Thêm tính năng hoàn điểm cần cả hai kỷ luật cùng lúc: một migration thêm cột và ràng buộc vào bảng ở `core`, entity cập nhật mapping tương ứng, logic ghi dùng optimistic locking để chống lost update, và một migration riêng ở `gift` nếu phía quà cũng đổi schema. Việc phát hành phải đảm bảo thứ tự tương thích giữa code và schema theo nguyên tắc mở rộng rồi thu hẹp (expand/contract) khi cần triển khai không gián đoạn.
+
+## Code
+
+Cần dependency `spring-boot-starter-data-jpa` và `flyway-core` cùng module Flyway cho PostgreSQL trong `pom.xml`.
+
+Entity có `@Version` và repository có cả truy vấn khóa bi quan cho đoạn trừ kho quà ngắn:
+
+```java filename=GiftStockRepository.java
+package com.nova.loyalty.gift.repository;
+
+import com.nova.loyalty.gift.domain.GiftStock;
+import jakarta.persistence.LockModeType;
+import java.util.Optional;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+
+public interface GiftStockRepository extends JpaRepository<GiftStock, Long> {
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select s from GiftStock s where s.giftId = :giftId")
+    Optional<GiftStock> findForUpdateByGiftId(@Param("giftId") String giftId);
+}
+```
+
+Service thử lại có giới hạn quanh đơn vị công việc dùng optimistic locking trên ví điểm:
+
+```java filename=PointsRetryService.java
+package com.nova.loyalty.core.service;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
+import org.springframework.stereotype.Service;
+
+@Service
+public class PointsRetryService {
+
+    private static final Logger log = LoggerFactory.getLogger(PointsRetryService.class);
+    private static final int MAX_ATTEMPTS = 3;
+
+    private final PointsDebitUnitOfWork unitOfWork;
+
+    public PointsRetryService(PointsDebitUnitOfWork unitOfWork) {
+        this.unitOfWork = unitOfWork;
+    }
+
+    public void changeWithRetry(Long memberId, long delta, String idempotencyKey) {
+        int attempt = 0;
+        while (true) {
+            attempt++;
+            try {
+                unitOfWork.change(memberId, delta, idempotencyKey);
+                return;
+            } catch (ObjectOptimisticLockingFailureException conflict) {
+                if (attempt >= MAX_ATTEMPTS) {
+                    throw conflict;
+                }
+                log.info("Optimistic lock conflict for member {} attempt {}, retrying", memberId, attempt);
+            }
+        }
+    }
+}
+```
+
+Trong đó `PointsDebitUnitOfWork.change` là một bean riêng mang `@Transactional` trên `coreTransactionManager`, đọc ví kèm `@Version` rồi áp dụng thay đổi, để mỗi lần thử lại là một transaction mới đọc lại dữ liệu mới nhất.
+
+Hai migration Flyway liên tiếp cho database core, đúng quy ước 14 chữ số:
+
+```sql filename=V20261022103000__create_points_wallet.sql
+CREATE TABLE points_wallet (
+    id BIGINT PRIMARY KEY,
+    member_id BIGINT NOT NULL UNIQUE,
+    balance BIGINT NOT NULL,
+    version BIGINT NOT NULL DEFAULT 0
+);
+
+CREATE SEQUENCE points_wallet_id_seq START WITH 1 INCREMENT BY 50;
+```
+
+```sql filename=V20261022104500__add_wallet_idempotency.sql
+CREATE TABLE processed_change (
+    idempotency_key VARCHAR(128) PRIMARY KEY,
+    member_id BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_processed_change_member ON processed_change (member_id);
+```
+
+## Sai lầm thường gặp
+
+### 1. Sửa nội dung một migration đã áp dụng
+
+- **Triệu chứng:** Ứng dụng từ chối khởi động ở môi trường tiếp theo với lỗi lệch checksum của migration.
+- **Nguyên nhân:** Checksum trong bảng lịch sử không còn khớp nội dung file đã bị sửa; Flyway coi đây là dấu hiệu lịch sử bị can thiệp.
+- **Fix:** Không bao giờ sửa migration đã áp dụng ở môi trường chung; viết migration mới tiếp nối để đạt trạng thái schema mong muốn.
+
+### 2. Hai nhánh cùng tạo một version migration
+
+- **Triệu chứng:** Khi gộp nhánh, Flyway báo trùng version hoặc thứ tự áp dụng không còn phản ánh đúng ý đồ.
+- **Nguyên nhân:** Version đặt tay theo số thứ tự nhỏ rất dễ trùng khi nhiều người cùng thêm migration.
+- **Fix:** Dùng version 14 chữ số theo thời gian tạo file như quy ước của Nova, và review danh sách migration như một phần của mọi lần gộp nhánh.
+
+### 3. Bắt OptimisticLockException rồi thử lại nguyên trạng thái cũ
+
+- **Triệu chứng:** Lần thử lại vẫn xung đột ngay lập tức, hoặc tệ hơn là ghi đè mất cập nhật của transaction thắng.
+- **Nguyên nhân:** Thử lại dùng lại entity đã đọc từ transaction cũ thay vì đọc lại trạng thái mới nhất trong transaction mới.
+- **Fix:** Thử lại toàn bộ đơn vị công việc từ bước đọc, trong transaction mới, với số lần có giới hạn và khoá idempotency bảo vệ ở biên ghi.
+
+### 4. Giữ khóa bi quan qua lời gọi ra hệ thống ngoài
+
+- **Triệu chứng:** Hàng loạt transaction chờ khóa, pool cạn dần, deadlock xuất hiện khi thứ tự khóa không nhất quán.
+- **Nguyên nhân:** Khóa `FOR UPDATE` được giữ trong suốt transaction, kể cả lúc chờ CRM/mạng — biến một đoạn khóa ngắn thành khóa rất dài.
+- **Fix:** Transaction giữ khóa phải ngắn, thuần database, không gọi ra ngoài; luôn lấy khóa theo một thứ tự cố định theo id để tránh deadlock vòng tròn.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay (viết, vẽ sơ đồ, đọc code) — không có chấm tự động.
+
+1. **Viết code:** Viết một đơn vị công việc cộng điểm dùng optimistic locking hoàn chỉnh và lớp thử lại quanh nó, gồm giới hạn số lần thử và hành vi khi chạm giới hạn.
+2. **Đọc code trả lời:** Đọc `GiftStockRepository` ở mục Code: vì sao đoạn trừ kho quà dùng khóa bi quan còn cộng điểm dùng optimistic? Điều kiện nào đổi ngược lại quyết định này?
+3. **Viết tay chuỗi migration:** Phác thảo 4 migration liên tiếp (tên file đầy đủ đúng quy ước 14 chữ số) cho tiến hoá: tạo bảng ví, thêm cột trạng thái, tạo bảng outbox, thêm chỉ mục cho outbox; ghi rõ nội dung chính của từng file.
+4. **Vẽ sơ đồ:** Vẽ timeline hai transaction cùng cộng điểm vào một ví ở ba kịch bản: không khóa, optimistic có thử lại, pessimistic; ghi kết quả số dư và số lần đọc/ghi ở từng kịch bản.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Flyway — Documentation: https://flywaydb.org/documentation/
+- Spring Data JPA — Locking: https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html
+- Spring Framework — Transaction và Locking: https://docs.spring.io/spring-framework/reference/data-access/transaction.html
+- Spring Boot — Flyway: https://docs.spring.io/spring-boot/reference/data/sql.html
+
+## Đọc thêm
+
+Không có.

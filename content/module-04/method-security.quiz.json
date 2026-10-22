@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Bật được method security bằng @EnableMethodSecurity trên lớp cấu hình.",
+    "Viết được @PreAuthorize kiểm tra hasRole, hasAuthority và điều kiện sở hữu đối tượng.",
+    "Giải thích được khác biệt giữa phân quyền theo URL và phân quyền ở tầng service.",
+    "Nhận diện và ngăn được lỗ hổng IDOR trên ví điểm.",
+    "Tránh được lỗi tự gọi method trong cùng class làm mất hiệu lực proxy.",
+    "Đóng gói logic kiểm tra phức tạp vào bean riêng để dễ test thay vì nhồi vào SpEL."
+  ],
+  "quiz": [
+    {
+      "answerIndex": 1,
+      "explanation": "Từ Spring Security 6, @EnableMethodSecurity là annotation hiện đại để bật method security với PreAuthorize/PostAuthorize.",
+      "options": [
+        "@EnableWebSecurity",
+        "@EnableMethodSecurity",
+        "@Secured ở mức class",
+        "Một bean XML riêng"
+      ],
+      "question": "Annotation nào bật method security trong Spring Security 6?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "PreAuthorize đánh giá trước khi method chạy; nếu sai, method không được thực thi và AccessDeniedException được ném.",
+      "options": [
+        "Chỉ khi ghi log",
+        "Sau khi method trả kết quả",
+        "Song song với logic nghiệp vụ",
+        "Trước khi method chạy, để chặn lời gọi thiếu quyền"
+      ],
+      "question": "@PreAuthorize đánh giá biểu thức SpEL vào thời điểm nào?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "IDOR là thao tác trực tiếp lên đối tượng qua id do client cung cấp mà không kiểm tra quyền sở hữu.",
+      "options": [
+        "Quên đặt mật khẩu cho database",
+        "CORS cấu hình sai origin",
+        "Token hết hạn giữa chừng",
+        "Dùng id của người khác trong request để thao tác lên dữ liệu của họ mà không bị kiểm tra sở hữu"
+      ],
+      "question": "Lỗ hổng IDOR trong ngữ cảnh ví điểm là gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Lớp URL không biết chủ sở hữu của ví; kiểm tra sở hữu cần dữ liệu nghiệp vụ và thuộc tầng service.",
+      "options": [
+        "Vì SpEL chạy nhanh hơn filter",
+        "Vì quyết định cần biết chủ sở hữu của đối tượng, thông tin chỉ có ở tầng nghiệp vụ",
+        "Vì controller không nhận được JWT",
+        "Vì gateway đã kiểm tra hết mọi thứ"
+      ],
+      "question": "Vì sao phân quyền trên đối tượng phải đặt ở tầng service thay vì chỉ ở filter chain?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Method security dựa trên AOP proxy; lời gọi this.method() không đi qua proxy nên annotation không được áp dụng.",
+      "options": [
+        "Vì lời gọi nội bộ bỏ qua AOP proxy của Spring",
+        "Vì transaction luôn tắt method security",
+        "Vì annotation bị xóa khi biên dịch",
+        "Vì SpEL không hỗ trợ gọi nội bộ"
+      ],
+      "question": "Vì sao tự gọi method có @PreAuthorize trong cùng class lại nguy hiểm?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "hasRole kiểm tra authority dạng ROLE_ cộng tên role; hasAuthority kiểm tra chuỗi authority nguyên văn như points:adjust.",
+      "options": [
+        "hasAuthority mạnh hơn vì tự verify JWT",
+        "hasRole dùng cho URL, hasAuthority dùng cho database",
+        "hasRole tự thêm tiền tố ROLE_, hasAuthority so khớp authority nguyên văn",
+        "Chúng là một, không khác gì nhau"
+      ],
+      "question": "Khác biệt giữa hasRole và hasAuthority là gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Logic dài và có truy vấn nên đóng gói vào bean có thể unit test, SpEL chỉ giữ lời gọi ngắn gọn tới bean đó.",
+      "options": [
+        "Viết tất cả vào một chuỗi SpEL thật dài",
+        "Đóng gói vào một bean kiểm tra riêng và gọi từ SpEL",
+        "Kiểm tra thủ công trong từng controller",
+        "Bỏ kiểm tra và tin gateway"
+      ],
+      "question": "Khi điều kiện phân quyền phức tạp và cần truy vấn dữ liệu, cách làm được khuyến nghị là gì?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "AccessDeniedException từ tầng method security được tầng web ánh xạ thành 403 Forbidden.",
+      "options": [
+        "403 Forbidden",
+        "500 trong mọi trường hợp",
+        "302 chuyển hướng login",
+        "200 kèm thông điệp mềm"
+      ],
+      "question": "Khi @PreAuthorize thất bại, kết quả HTTP đúng cho API là gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Kết hợp cả hai mới đúng: role CUSTOMER cho biết loại người gọi, điều kiện sở hữu đảm bảo ví thuộc về chính họ (hoặc họ là quản trị viên).",
+      "options": [
+        "Chỉ cần đăng nhập thành công",
+        "Không cần rule vì đã có idempotency",
+        "Cần role phù hợp và điều kiện chủ sở hữu hoặc authority quản trị",
+        "Chỉ cần hasRole CUSTOMER"
+      ],
+      "question": "Để khách chỉ xem được ví của chính mình, rule cần kết hợp điều gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "PostAuthorize kiểm tra trên kết quả trả về hoặc đối tượng sau khi method chạy, hữu ích khi quyền phụ thuộc vào dữ liệu kết quả.",
+      "options": [
+        "Chỉ dùng cho annotation Secured",
+        "Kiểm tra trước khi proxy được tạo",
+        "Đánh giá trên kết quả trả về sau khi method chạy",
+        "Thay thế cho PreAuthorize trong mọi trường hợp"
+      ],
+      "question": "@PostAuthorize khác @PreAuthorize ở điểm nào?"
+    }
+  ]
+}

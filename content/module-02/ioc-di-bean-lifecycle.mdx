@@ -1,0 +1,220 @@
+---
+title: "IoC, Dependency Injection và vòng đời bean"
+module: 2
+level: "Junior"
+duration: 40
+order: 1
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Giải thích được Inversion of Control và Dependency Injection: ai tạo object, ai sở hữu vòng đời, và vì sao constructor injection là lựa chọn mặc định.
+- Mô tả được vòng đời của một singleton bean từ lúc khởi tạo, qua các lifecycle callback, tới lúc context đóng.
+- Chọn đúng scope cho bean (`singleton`, `prototype`, request/session scope) và nhận diện lỗi khi inject bean scope hẹp vào bean scope rộng.
+
+## Vì sao cần biết
+
+Mọi service trong Nova Loyalty đều là tập hợp các bean: controller nhận request từ gateway, service xử lý điểm với CAS và `idempotencyKey`, repository làm việc với từng datasource trong 5 datasource không JTA. Nếu lập trình viên tự `new` các phụ thuộc trong class, việc thay một implementation — ví dụ đổi CRM client thật bằng bản giả lập khi test, hoặc đổi cấu hình pool theo môi trường — trở thành phẫu thuật khắp codebase. IoC container của Spring đảo ngược quyền kiểm soát đó: class chỉ tuyên bố phụ thuộc qua constructor, container tạo và lắp ráp toàn bộ đồ thị object. Hiểu vòng đời bean cũng là điều kiện để không mắc các lỗi kinh điển như đọc bean chưa sẵn sàng trong constructor, hoặc giữ trạng thái theo request trong một singleton dùng chung cho mọi thread.
+
+## Nội dung chính
+
+### IoC và DI là hai mặt của một ý tưởng
+
+Inversion of Control nghĩa là quyền quyết định tạo object và gọi lifecycle được chuyển từ code ứng dụng sang framework. Dependency Injection là hình thức IoC cụ thể mà Spring dùng: phụ thuộc được đưa vào object từ bên ngoài thay vì object tự tạo chúng. Ba hình thức inject:
+
+- Constructor injection: phụ thuộc là tham số constructor, bắt buộc và bất biến sau khi tạo. Đây là lựa chọn mặc định được Spring khuyến nghị.
+- Setter injection: phù hợp cho phụ thuộc tuỳ chọn, có thể thay đổi sau khi tạo.
+- Field injection: ngắn nhưng giấu phụ thuộc, khó test không container và không đảm bảo bất biến — nên tránh trong code mới.
+
+Với một constructor duy nhất, Spring tự inject mà không cần annotation trên constructor. Nhiều constructor thì cần đánh dấu constructor muốn container dùng.
+
+### Vòng đời của singleton bean
+
+Một singleton bean điển hình đi qua các giai đoạn:
+
+1. Container đọc bean definition từ annotation scanning hoặc cấu hình.
+2. Khởi tạo instance qua constructor, inject các phụ thuộc.
+3. Xử lý các annotation lifecycle: method đánh dấu `@PostConstruct` chạy sau khi inject xong.
+4. Bean sẵn sàng phục vụ trong suốt tuổi thọ của `ApplicationContext`.
+5. Khi context đóng, method đánh dấu `@PreDestroy` chạy để giải phóng tài nguyên.
+
+Hai thời điểm dễ gây lỗi nhất là constructor — lúc này các bean phụ thuộc qua proxy có thể chưa sẵn sàng để gọi nghiệp vụ — và lúc shutdown, khi thứ tự huỷ của các bean có quan hệ phụ thuộc cần được tôn trọng. Đặt logic khởi động cần gọi bean khác vào `@PostConstruct` hoặc sự kiện sẵn sàng của ứng dụng, không đặt vào constructor.
+
+### Scope quyết định số instance và tuổi thọ
+
+Scope mặc định `singleton` nghĩa là một instance cho mỗi bean definition trong một context, dùng chung cho mọi thread: bean singleton tuyệt đối không giữ trạng thái theo request. Các scope khác:
+
+- `prototype`: mỗi lần được yêu cầu là một instance mới, container không quản lý bước huỷ.
+- Request/session scope cho web: mỗi HTTP request hoặc session có instance riêng, thường dùng qua scoped proxy khi inject vào singleton.
+- Application scope cho trạng thái gắn với `ServletContext`.
+
+Lỗi kinh điển là inject trực tiếp một bean request-scoped vào singleton mà không qua proxy: container hoặc cấp instance của request đầu tiên cho mọi request sau, hoặc báo lỗi khi không có request đang hoạt động.
+
+<Mermaid chart={`flowchart LR
+  A["Đọc bean definition"] --> B["Constructor injection"]
+  B --> C["PostConstruct callback"]
+  C --> D["Bean sẵn sàng phục vụ"]
+  D --> E["Context đóng"]
+  E --> F["PreDestroy callback"]`} label="Vòng đời singleton bean trong Spring: từ definition tới khởi tạo, sẵn sàng và huỷ khi context đóng." />
+
+### Vì sao constructor injection thắng trong review
+
+Constructor injection làm phụ thuộc hiển hình trong chữ ký, đảm bảo object luôn hợp lệ ngay khi tạo xong, cho phép field là `final`, và giúp test đơn vị tạo object bằng `new` thông thường mà không cần reflection hay container. Một constructor phình to bất thường cũng là tín hiệu thiết kế hữu ích: class đang có quá nhiều trách nhiệm và nên được tách nhỏ.
+
+## Code
+
+Cần dependency `spring-boot-starter` (hoặc `spring-boot-starter-web`) trong `pom.xml`.
+
+Service dùng constructor injection với field `final`, và lifecycle callback nằm đúng chỗ:
+
+```java filename=PointsAccountService.java
+package com.nova.loyalty.points;
+
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+
+@Service
+public class PointsAccountService {
+
+    private static final Logger log = LoggerFactory.getLogger(PointsAccountService.class);
+
+    private final PointsWalletRepository walletRepository;
+    private final OutboxEventWriter outboxEventWriter;
+    private final CrmSyncNotifier crmSyncNotifier;
+
+    public PointsAccountService(PointsWalletRepository walletRepository,
+                                OutboxEventWriter outboxEventWriter,
+                                CrmSyncNotifier crmSyncNotifier) {
+        this.walletRepository = walletRepository;
+        this.outboxEventWriter = outboxEventWriter;
+        this.crmSyncNotifier = crmSyncNotifier;
+    }
+
+    @PostConstruct
+    void logReady() {
+        log.info("PointsAccountService ready with repository {}", walletRepository.getClass().getSimpleName());
+    }
+
+    public long changePoints(Long memberId, long delta, String idempotencyKey) {
+        PointsWallet wallet = walletRepository.findByMemberId(memberId)
+                .orElseThrow(() -> new IllegalArgumentException("Wallet not found: " + memberId));
+        wallet.applyDelta(delta);
+        walletRepository.save(wallet);
+        outboxEventWriter.writePointsChanged(memberId, delta, idempotencyKey);
+        crmSyncNotifier.notifyLater(memberId);
+        return wallet.getBalance();
+    }
+
+    @PreDestroy
+    void logShutdown() {
+        log.info("PointsAccountService shutting down");
+    }
+}
+```
+
+Một bean `prototype` cho đối tượng tính toán dùng một lần, và cách xin instance mới qua `ObjectProvider`:
+
+```java filename=SettlementCalculatorProvider.java
+package com.nova.loyalty.points;
+
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.context.annotation.Scope;
+import org.springframework.stereotype.Component;
+
+public class SettlementCalculatorProvider {
+
+    @Component
+    @Scope("prototype")
+    public static class SettlementCalculator {
+
+        private long accumulated;
+
+        public void add(long delta) {
+            accumulated += delta;
+        }
+
+        public long total() {
+            return accumulated;
+        }
+    }
+
+    @Component
+    public static class SettlementFacade {
+
+        private final ObjectProvider<SettlementCalculator> calculatorProvider;
+
+        public SettlementFacade(ObjectProvider<SettlementCalculator> calculatorProvider) {
+            this.calculatorProvider = calculatorProvider;
+        }
+
+        public long settle(java.util.List<Long> deltas) {
+            SettlementCalculator calculator = calculatorProvider.getObject();
+            deltas.forEach(calculator::add);
+            return calculator.total();
+        }
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Giữ trạng thái theo request trong singleton bean
+
+- **Triệu chứng:** Dữ liệu của user này thỉnh thoảng xuất hiện trong response của user khác khi tải cao.
+- **Nguyên nhân:** Singleton được dùng chung cho mọi thread; field mutable bị nhiều request ghi đè lẫn nhau.
+- **Fix:** Singleton chỉ giữ phụ thuộc bất biến; trạng thái theo request truyền qua tham số method hoặc bean request-scoped qua proxy.
+
+### 2. Gọi nghiệp vụ của bean khác ngay trong constructor
+
+- **Triệu chứng:** Lỗi khó hiểu lúc khởi động, bean nhận được proxy chưa sẵn sàng hoặc giá trị rỗng không ổn định.
+- **Nguyên nhân:** Lúc constructor chạy, quá trình inject và khởi tạo vòng đời của đồ thị bean chưa hoàn tất.
+- **Fix:** Constructor chỉ gán phụ thuộc; logic khởi động đặt trong `@PostConstruct` hoặc listener sự kiện sẵn sàng.
+
+### 3. Field injection khắp nơi
+
+- **Triệu chứng:** Test đơn vị phải dùng reflection để gán field, class nhìn "nhẹ" nhưng ẩn hàng loạt phụ thuộc.
+- **Nguyên nhân:** Field injection giấu phụ thuộc khỏi chữ ký và cho phép object tồn tại ở trạng thái chưa đủ phụ thuộc.
+- **Fix:** Chuyển sang constructor injection với field `final`; constructor quá dài là tín hiệu tách class.
+
+### 4. Inject bean prototype trực tiếp vào singleton và mong mỗi lần dùng là mới
+
+- **Triệu chứng:** Bean prototype chỉ được tạo đúng một lần lúc singleton khởi tạo, hành vi giống hệt singleton.
+- **Nguyên nhân:** Thời điểm inject quyết định instance; singleton chỉ inject một lần duy nhất.
+- **Fix:** Inject `ObjectProvider` hoặc dùng scoped proxy, xin instance mới ở mỗi lần sử dụng.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay (viết, vẽ sơ đồ, đọc code) — không có chấm tự động.
+
+1. **Vẽ sơ đồ:** Vẽ đồ thị phụ thuộc của một controller, một service và hai repository trong Nova Loyalty, ghi rõ bean nào tạo bean nào và scope của từng bean.
+2. **Đọc code trả lời:** Đọc `PointsAccountService` ở mục Code: vì sao `logReady` đặt ở `@PostConstruct` thay vì cuối constructor? Nếu di chuyển lệnh log vào constructor trước khi gán field thì rủi ro gì xảy ra?
+3. **Viết code:** Viết một bean `prototype` đại diện giỏ đổi quà dùng một lần và một facade singleton lấy instance mới qua `ObjectProvider` cho mỗi lần xử lý.
+4. **Viết tay phân tích:** Tìm trong trí nhớ một class bạn từng viết tự `new` phụ thuộc bên trong, và viết lại kế hoạch refactor nó sang constructor injection gồm các bước cụ thể.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Framework — IoC Container: https://docs.spring.io/spring-framework/reference/core/beans.html
+- Spring Framework — Dependency Injection: https://docs.spring.io/spring-framework/reference/core/beans/dependencies/factory-collaborators.html
+- Spring Framework — Bean Scopes: https://docs.spring.io/spring-framework/reference/core/beans/factory-scopes.html
+- Spring Boot — Spring Application: https://docs.spring.io/spring-boot/reference/features/spring-application.html
+
+## Đọc thêm
+
+Không có.

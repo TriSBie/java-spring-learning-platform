@@ -1,0 +1,209 @@
+---
+title: "Hibernate 6: mapping, fetch types và batch fetching"
+module: 3
+level: "Middle"
+duration: 50
+order: 1
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Spring Data JPA 3.3.x", "Hibernate 6.5.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Ánh xạ được entity Hibernate 6 với các annotation cốt lõi, chọn đúng kiểu Java cho cột và hiểu vai trò của identifier, equals/hashCode trên entity.
+- Quyết định được fetch type cho từng quan hệ: `LAZY` làm mặc định cho collection và quan hệ nhiều, `EAGER` chỉ khi có lý do đo được.
+- Cấu hình được batch fetching bằng `@BatchSize` hoặc thuộc tính batch fetch size để giảm số câu query cho các collection được nạp lười.
+
+## Vì sao cần biết
+
+Lớp dữ liệu của Nova Loyalty là nơi mọi giao dịch điểm đi qua: ví điểm, lịch sử giao dịch, quà đã đổi, bản ghi audit. Chỉ một quyết định mapping sai — ví dụ một collection để `EAGER` mặc định theo thói quen — cũng đủ biến một endpoint liệt kê hội viên thành hàng nghìn câu query mỗi request, kéo theo cả 5 pool HikariCP cùng nghẽn khi traffic tăng. Ngược lại, mapping đúng với mọi quan hệ nạp lười và batch fetching hợp lý giúp cùng một đoạn code nghiệp vụ chạy với số query có thể dự đoán. Hibernate 6 là phiên bản đi cùng Boot 3 và Spring Data JPA 3.3.x trong hệ này; hiểu mapping và fetch ở mức này là nền cho bài N+1 ngay sau và cho việc review mọi thay đổi schema về sau.
+
+## Nội dung chính
+
+### Giải phẫu một entity
+
+Một entity là class được đánh dấu `@Entity` với một identifier duy nhất qua `@Id`. Các quy tắc nền tảng:
+
+- Entity cần constructor không tham số (có thể `protected`) để Hibernate khởi tạo qua reflection/proxy.
+- Field truy cập trực tiếp hoặc qua accessor; chọn một phong cách và giữ nhất quán vì Hibernate bám theo vị trí đặt annotation id.
+- Kiểu Java nên phản ánh đúng ngữ nghĩa cột: tiền/điểm dùng `long` hoặc `BigDecimal` thay vì số thực, thời gian dùng `Instant`/`LocalDateTime` có chủ đích về múi giờ.
+- `equals` và `hashCode` của entity không nên dựa trên các field mutable; an toàn nhất là dựa trên khoá nghiệp vụ bất biến, hoặc giữ mặc định của `Object` kèm kỷ luật không đặt entity chưa có id ổn định vào `Set`.
+
+### Fetch type: mặc định của JPA và lựa chọn thực hành
+
+JPA đặt mặc định `EAGER` cho quan hệ một-một và nhiều-một, `LAZY` cho quan hệ một-nhiều và nhiều-nhiều. Mặc định này là cái bẫy nổi tiếng nhất của JPA: quan hệ nhiều-một để `EAGER` khiến việc nạp một giao dịch luôn kéo theo ví, hội viên và có thể cả chuỗi quan hệ tiếp theo. Thực hành chuẩn trong các hệ hiệu năng cao:
+
+- Mọi collection luôn `LAZY`, không có ngoại lệ mặc định.
+- Quan hệ nhiều-một/một-một cũng đặt `LAZY` tường minh, và nạp dữ liệu cần thiết ở tầng query bằng các chiến lược của bài sau.
+- Chỉ cân nhắc `EAGER` khi quan hệ thật sự luôn luôn được dùng cùng nhau, kích thước nhỏ, và đã đo được lợi ích — quyết định này ghi lại trong review như một ngoại lệ có lý do.
+
+Với quan hệ một-một lười có phía không sở hữu khoá ngoại, Hibernate có các giới hạn kỹ thuật riêng về proxy; cần đối chiếu tài liệu của đúng phiên bản khi gặp trường hợp đặc biệt thay vì giả định mọi quan hệ đều lười được như nhau.
+
+### Batch fetching: nạp lười theo lô
+
+Khi nhiều entity cha đã nằm trong persistence context và code chạm vào collection lười của từng entity, Hibernate có thể nạp các collection đó theo lô thay vì từng cái một: với batch size là N, lần chạm đầu tiên nạp luôn collection của tối đa N entity cùng loại đang được quản lý. Khai báo bằng annotation `@BatchSize` trên collection/class, hoặc đặt thuộc tính batch fetch size toàn cục trong cấu hình Hibernate của Boot.
+
+Batch fetching không thay đổi ngữ nghĩa dữ liệu, chỉ thay đổi số vòng đi tới database. Nó là công cụ lý tưởng khi mẫu truy cập là "nạp danh sách cha trước, dữ liệu con cần cho mọi cha" — và là một phần của đáp án N+1 có kiểm soát ở bài tiếp theo.
+
+<Mermaid chart={`flowchart LR
+  A["Query nạp 20 ví điểm"] --> B["Chạm collection giao dịch của ví đầu tiên"]
+  B --> C["Hibernate nạp theo lô 10 collection cùng lúc"]
+  C --> D["Các lần chạm tiếp theo dùng dữ liệu đã nạp"]
+  D --> E["Tổng số query giảm mạnh so với nạp từng cái"]`} label="Batch fetching tại Nova Loyalty: collection lười được nạp theo lô cho các ví đang có trong persistence context." />
+
+### Sinh khoá chính và các chi tiết Hibernate 6
+
+Hibernate 6 chuẩn hoá nhiều hành vi quanh sinh identifier: chiến lược `GenerationType` nên chọn theo đặc tính của database và nhu cầu batch insert. Với PostgreSQL, sequence cho phép Hibernate lấy khoá trước khi insert và gom batch hiệu quả, trong khi identity ép insert ngay để biết khoá, làm giảm khả năng batch. Quyết định này thuộc về thiết kế mapping ban đầu và rất tốn kém khi sửa muộn trên bảng đã có dữ liệu lớn.
+
+## Code
+
+Cần dependency `spring-boot-starter-data-jpa` và driver PostgreSQL trong `pom.xml`.
+
+Entity ví điểm với các quan hệ đều lười và batch size trên collection lịch sử:
+
+```java filename=PointsWallet.java
+package com.nova.loyalty.core.domain;
+
+import jakarta.persistence.CascadeType;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.FetchType;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.OneToMany;
+import jakarta.persistence.SequenceGenerator;
+import jakarta.persistence.Table;
+import jakarta.persistence.Version;
+import java.util.ArrayList;
+import java.util.List;
+import org.hibernate.annotations.BatchSize;
+
+@Entity
+@Table(name = "points_wallet")
+@SequenceGenerator(name = "walletSeq", sequenceName = "points_wallet_id_seq", allocationSize = 50)
+public class PointsWallet {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "walletSeq")
+    private Long id;
+
+    @Column(name = "member_id", nullable = false, unique = true)
+    private Long memberId;
+
+    @Column(name = "balance", nullable = false)
+    private long balance;
+
+    @Version
+    private long version;
+
+    @OneToMany(mappedBy = "wallet", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
+    @BatchSize(size = 25)
+    private List<PointTransaction> transactions = new ArrayList<>();
+
+    protected PointsWallet() {
+    }
+
+    public PointsWallet(Long memberId, long balance) {
+        this.memberId = memberId;
+        this.balance = balance;
+    }
+
+    public void applyDelta(long delta) {
+        long next = balance + delta;
+        if (next < 0) {
+            throw new IllegalArgumentException("Insufficient points for member " + memberId);
+        }
+        this.balance = next;
+    }
+
+    public void addTransaction(PointTransaction transaction) {
+        transactions.add(transaction);
+        transaction.attachTo(this);
+    }
+
+    public Long getId() {
+        return id;
+    }
+
+    public Long getMemberId() {
+        return memberId;
+    }
+
+    public long getBalance() {
+        return balance;
+    }
+
+    public List<PointTransaction> getTransactions() {
+        return transactions;
+    }
+}
+```
+
+Cấu hình bật batch fetching toàn cục và thống kê Hibernate ở môi trường phát triển qua file cấu hình của Boot:
+
+```properties filename=application.properties
+spring.jpa.properties.hibernate.default_batch_fetch_size=25
+spring.jpa.properties.hibernate.generate_statistics=true
+spring.jpa.open-in-view=false
+```
+
+Đặt `spring.jpa.open-in-view=false` là quyết định có chủ đích: không giữ persistence context mở tới tận tầng render, buộc mọi nhu cầu nạp dữ liệu phải được giải quyết trong transaction của service.
+
+## Sai lầm thường gặp
+
+### 1. Để mặc định EAGER cho các quan hệ nhiều-một
+
+- **Triệu chứng:** Một query đơn giản kéo theo hàng loạt query nạp quan hệ dây chuyền, số query tăng theo độ sâu đồ thị entity.
+- **Nguyên nhân:** Mặc định của JPA cho quan hệ nhiều-một là `EAGER`; không đặt lại tường minh đồng nghĩa chấp nhận nạp hăng hái khắp nơi.
+- **Fix:** Đặt `LAZY` tường minh cho mọi quan hệ, nạp dữ liệu cần thiết bằng chiến lược ở tầng query.
+
+### 2. Dựa equals và hashCode trên field mutable
+
+- **Triệu chứng:** Entity "biến mất" khỏi `Set` sau khi một field thay đổi, hoặc hai entity khác nhau bị coi là một.
+- **Nguyên nhân:** `hashCode` thay đổi sau khi entity đã nằm trong hash collection, phá vỡ hợp đồng của collection.
+- **Fix:** Dựa trên khoá nghiệp vụ bất biến, hoặc không tuỳ biến equals/hashCode và giữ kỷ luật khi dùng `Set` với entity.
+
+### 3. Dùng identity làm chiến lược sinh khoá cho bảng cần batch insert
+
+- **Triệu chứng:** Batch insert cấu hình đúng nhưng Hibernate vẫn insert từng dòng một.
+- **Nguyên nhân:** Với identity, Hibernate phải insert ngay để biết khoá của từng dòng, vô hiệu hoá việc gom batch.
+- **Fix:** Cân nhắc sequence trên PostgreSQL với `allocationSize` phù hợp cho các bảng ghi nhiều theo lô.
+
+### 4. Mở open-in-view để chữa lỗi nạp lười
+
+- **Triệu chứng:** Lỗi nạp lười biến mất nhưng transaction và connection bị giữ tới tận lúc render response, khó kiểm soát số query.
+- **Nguyên nhân:** `open-in-view` che giấu việc tầng service chưa nạp đủ dữ liệu trong transaction của nó.
+- **Fix:** Tắt open-in-view, chuyển nhu cầu nạp dữ liệu vào query/DTO projection trong transaction của service.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay (viết, vẽ sơ đồ, đọc code) — không có chấm tự động.
+
+1. **Viết code:** Viết entity `GiftRedemption` gồm identifier, quan hệ nhiều-một lười tới ví điểm, một collection lười các dòng chi tiết, trường version và constructor bảo vệ đúng chuẩn.
+2. **Đọc code trả lời:** Đọc `PointsWallet` ở mục Code: kể tên mọi quyết định mapping có chủ đích trong class này và hậu quả hiệu năng của từng quyết định nếu làm ngược lại.
+3. **Vẽ sơ đồ:** Vẽ đồ thị 4 entity của miền điểm (hội viên, ví, giao dịch, đổi quà) với chiều quan hệ, fetch type bạn chọn cho từng cạnh và lý do ngắn gọn.
+4. **Viết tay phân tích:** Viết đoạn phân tích 6–8 câu so sánh sequence và identity cho bảng ghi lịch sử giao dịch ghi hàng triệu dòng mỗi tháng, kết luận bằng một lựa chọn và điều kiện để đổi ý.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Data JPA — Reference Documentation: https://docs.spring.io/spring-data/jpa/reference/
+- Spring Boot — JPA và Hibernate Properties: https://docs.spring.io/spring-boot/reference/data/sql.html
+- Hibernate ORM — User Guide (trang tài liệu qua Spring): https://docs.spring.io/spring-boot/reference/data/sql.html
+- Spring Framework — Transaction và ORM: https://docs.spring.io/spring-framework/reference/data-access/orm.html
+
+## Đọc thêm
+
+Không có.

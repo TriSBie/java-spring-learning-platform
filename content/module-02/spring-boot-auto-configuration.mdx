@@ -1,0 +1,182 @@
+---
+title: "Spring Boot Auto-configuration: bên trong cơ chế tự cấu hình"
+module: 2
+level: "Senior"
+duration: 55
+order: 6
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Mô tả được cách Boot khám phá và áp dụng auto-configuration: danh sách imports, thứ tự xử lý, vai trò của các annotation điều kiện.
+- Đọc được condition evaluation report để trả lời chính xác vì sao một bean có hoặc không được tạo trong một ứng dụng cụ thể.
+- Viết được một auto-configuration đơn giản cho thư viện nội bộ, có tôn trọng nguyên tắc "lùi lại khi người dùng tự cấu hình" qua cơ chế back-off.
+
+## Vì sao cần biết
+
+Mọi ứng dụng Nova Loyalty đều "chạy được ngay" nhờ auto-configuration: datasource được tạo từ cấu hình, web server nhúng khởi động, Actuator có sẵn metric. Chính sự tiện lợi này che giấu cơ chế bên dưới, và khi hành vi không như kỳ vọng — một bean mặc định không xuất hiện, một datasource bị tạo sai nguồn vì có mặt một class nào đó trên classpath, hai thư viện cùng cung cấp một bean — người không hiểu cơ chế chỉ biết thử-sai. Hiểu auto-configuration biến những tình huống này thành việc đọc bằng chứng: classpath có gì, điều kiện nào khớp, bean nào đã tồn tại trước. Đây cũng là nền để viết thư viện starter nội bộ cho team: đóng gói cấu hình mặc định của nền tảng loyalty (pool, outbox, tracing) để mọi service dùng chung mà vẫn ghi đè được khi cần.
+
+## Nội dung chính
+
+### Từ @SpringBootApplication tới danh sách auto-configuration
+
+`@SpringBootApplication` gồm ba annotation chính, trong đó `@EnableAutoConfiguration` kích hoạt cơ chế: Boot đọc danh sách các class auto-configuration từ file `AutoConfiguration.imports` nằm trong mỗi thư viện (đường dẫn dưới thư mục metadata của jar), nạp chúng như các class cấu hình và chỉ giữ lại bean của những class có điều kiện khớp. Mỗi auto-configuration tự nó là một `@Configuration` thường gầy: phần lớn logic nằm ở các annotation điều kiện trên class và trên từng method bean.
+
+Thứ tự rất quan trọng: auto-configuration được xử lý sau cấu hình do người dùng viết, và các class có thứ tự khai báo rõ ràng khi một auto-configuration cần chạy trước/sau một auto-configuration khác. Nhờ xử lý sau, bean do người dùng định nghĩa có mặt trước và kích hoạt cơ chế back-off của auto-configuration.
+
+### Họ annotation điều kiện
+
+- `@ConditionalOnClass` và `@ConditionalOnMissingClass`: bean chỉ được tạo khi một class có hoặc không có trên classpath. Đây là cách một starter "tự nhận biết" thư viện nó tích hợp.
+- `@ConditionalOnBean` và `@ConditionalOnMissingBean`: dựa trên bean đã có trong context. `@ConditionalOnMissingBean` là trái tim của nguyên tắc back-off: thư viện cung cấp bean mặc định chỉ khi ứng dụng chưa tự định nghĩa bean cùng loại.
+- `@ConditionalOnProperty`: dựa trên khóa cấu hình có mặt/giá trị, cho phép bật tắt tính năng bằng cấu hình.
+- `@ConditionalOnWebApplication`, `@ConditionalOnSingleCandidate` và các điều kiện khác cho các ngữ cảnh chuyên biệt.
+
+Điều kiện được đánh giá ở hai giai đoạn khác nhau (parse configuration và register bean definition); hiểu điều này giải thích một số khác biệt tinh vi về thời điểm một bean được tính là "đã tồn tại".
+
+### Condition evaluation report: bằng chứng thay vì phỏng đoán
+
+Khi ứng dụng không tạo bean như kỳ vọng, công cụ đầu tiên là condition report: bật mức log debug cho bộ đánh giá điều kiện, hoặc đọc qua endpoint Actuator tương ứng ở môi trường được phép. Báo cáo liệt kê theo từng auto-configuration: điều kiện nào khớp (positive match), điều kiện nào không khớp và lý do (negative match), cùng các auto-configuration bị loại hoàn toàn. Đọc báo cáo này thay cho việc đoán mò là thói quen phân biệt một Senior với người chỉ biết thử lại.
+
+### Viết starter nội bộ đúng cách
+
+Một starter nội bộ cho nền tảng cần tách bạch: module auto-configuration chứa class cấu hình kèm điều kiện, module starter chỉ mang dependency gom nhóm. Trong class cấu hình: đặt bean mặc định phía sau `@ConditionalOnMissingBean`, cấu hình tham số qua `@ConfigurationProperties` riêng, đặt tên tiền tố riêng, và tránh phụ thuộc cứng vào các thành phần chỉ có ở một loại ứng dụng (ví dụ tầng web) bằng điều kiện về loại ứng dụng.
+
+### Hai giai đoạn đánh giá điều kiện
+
+Điều kiện trên class auto-configuration được đánh giá sớm, ngay khi container phân tích các class cấu hình: ở giai đoạn này container chủ yếu biết về các bean definition được suy ra trực tiếp từ cấu hình, chưa biết mọi bean sẽ tồn tại ở runtime. Điều kiện trên method `@Bean` được đánh giá muộn hơn, khi định nghĩa bean tương ứng được đăng ký. Hệ quả thực hành gồm hai điểm:
+
+- Một điều kiện theo bean đặt ở mức class có thể cho kết quả khác với cùng điều kiện đó đặt ở mức method, vì tập bean "đã biết" ở hai thời điểm không giống nhau.
+- Khi điều tra, cần đọc condition report theo đúng tầng: bị loại ở mức class nghĩa là toàn bộ đóng góp của class đó biến mất, còn bị loại ở mức bean thì chỉ riêng bean đó back-off.
+
+### Tự tạo annotation điều kiện dùng lại
+
+Khi cùng một tổ hợp điều kiện lặp lại ở nhiều nơi — ví dụ "chỉ khi tính năng outbox của nền tảng được bật và ứng dụng là web" — ta có thể đóng gói chúng thành một annotation tuỳ biến bằng cách chồng các annotation điều kiện lên một annotation mới và dùng annotation mới đó ở mọi nơi cần thiết. Kỹ thuật này giữ các điểm kích hoạt nhất quán: đổi quy tắc ở một nơi, mọi nơi dùng annotation đều thay đổi theo, và condition report vẫn ghi nhận các điều kiện thành phần một cách rõ ràng để điều tra.
+
+Cách đóng gói này đặc biệt hữu ích cho thư viện nền tảng nội bộ, nơi cùng một bộ quy tắc kích hoạt áp dụng cho hàng chục service: mỗi service nhận đúng cùng một hành vi mặc định, và mọi ngoại lệ đều phải được viết tường minh trong cấu hình của chính service đó.
+
+Một thói quen review hữu ích khi chạm vào bất kỳ starter nào: trước khi đọc code, hãy liệt kê ba câu hỏi mà condition report sẽ phải trả lời được cho starter đó — bean mặc định nào được cung cấp, điều kiện nào quyết định sự tồn tại của chúng, và bean tự viết nào của ứng dụng sẽ khiến chúng back-off. Nếu tài liệu của starter không trả lời được ba câu này, đội ngũ vận hành sẽ phải trả lời chúng bằng cách đọc mã nguồn vào lúc xảy ra sự cố, tức là ở thời điểm đắt đỏ nhất.
+
+Thói quen này cũng áp dụng ngược lại cho người viết starter: ba câu trả lời đó nên nằm ngay trong tài liệu đi kèm thư viện, kèm một ví dụ cấu hình ghi đè hoàn chỉnh, để người dùng không bao giờ phải đoán cách tắt hoặc thay thế một bean mặc định.
+
+<Mermaid chart={`flowchart TD
+  A["Đọc danh sách AutoConfiguration.imports"] --> B["Nạp class cấu hình ứng cử"]
+  B --> C{"Điều kiện trên class khớp?"}
+  C -->|"Không"| D["Loại bỏ và ghi vào condition report"]
+  C -->|"Có"| E{"Điều kiện trên từng Bean khớp?"}
+  E -->|"Có"| F["Đăng ký bean"]
+  E -->|"Không, đã có bean người dùng"| G["Back-off, nhường cấu hình tự viết"]`} label="Luồng xử lý auto-configuration: từ danh sách imports qua hai tầng điều kiện tới đăng ký bean hoặc back-off." />
+
+## Code
+
+Cần module riêng cho thư viện. Dependency của module auto-configuration gồm `spring-boot-autoconfigure` và `spring-boot-configuration-processor` (tuỳ chọn, cho metadata) trong `pom.xml`.
+
+Một auto-configuration tối giản cho bộ ghi outbox mặc định, tôn trọng back-off:
+
+```java filename=OutboxAutoConfiguration.java
+package com.nova.platform.outbox.autoconfigure;
+
+import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.jdbc.core.JdbcTemplate;
+
+@AutoConfiguration
+@ConditionalOnClass(JdbcTemplate.class)
+@EnableConfigurationProperties(OutboxProperties.class)
+public class OutboxAutoConfiguration {
+
+    @Bean
+    @ConditionalOnMissingBean
+    public OutboxEventWriter outboxEventWriter(JdbcTemplate jdbcTemplate, OutboxProperties properties) {
+        return new JdbcOutboxEventWriter(jdbcTemplate, properties.tableName());
+    }
+}
+```
+
+Properties đi kèm và file đăng ký auto-configuration:
+
+```java filename=OutboxProperties.java
+package com.nova.platform.outbox.autoconfigure;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+
+@ConfigurationProperties(prefix = "nova.platform.outbox")
+public record OutboxProperties(String tableName, boolean enabled) {
+
+    public OutboxProperties {
+        if (tableName == null || tableName.isBlank()) {
+            tableName = "outbox_event";
+        }
+    }
+}
+```
+
+```text filename=AutoConfiguration.imports
+com.nova.platform.outbox.autoconfigure.OutboxAutoConfiguration
+```
+
+Đường dẫn đầy đủ của file imports trong jar là thư mục `META-INF/spring/` cộng tên file chuẩn `org.springframework.boot.autoconfigure.AutoConfiguration.imports` — nội dung mỗi dòng là tên đầy đủ của một class auto-configuration.
+
+Lưu ý khi kiểm chứng một starter vừa viết: hãy viết ít nhất hai test bằng cơ chế test context runner của Boot — một test khẳng định bean mặc định xuất hiện khi ứng dụng không tự cấu hình gì, và một test khẳng định bean mặc định biến mất (back-off) khi ứng dụng tự cung cấp bean cùng loại. Hai test này biến nguyên tắc back-off thành hành vi được khóa bởi kiểm chứng tự động, thay vì một quy ước chỉ nằm trong tài liệu của thư viện. Nếu một trong hai test đỏ sau một lần refactor, đó là dấu hiệu cơ chế điều kiện đã bị phá vỡ trước khi tới tay các service sử dụng.
+
+## Sai lầm thường gặp
+
+### 1. Quên ConditionalOnMissingBean cho bean mặc định
+
+- **Triệu chứng:** Ứng dụng lỗi khởi động vì có hai bean cùng loại khi người dùng tự định nghĩa bean của họ.
+- **Nguyên nhân:** Auto-configuration đăng ký bean vô điều kiện, xung đột với bean do ứng dụng cung cấp.
+- **Fix:** Mọi bean mặc định của thư viện đặt sau `@ConditionalOnMissingBean` để tôn trọng nguyên tắc back-off.
+
+### 2. Đoán mò thay vì đọc condition report
+
+- **Triệu chứng:** Hàng giờ thử-sai đổi cấu hình mà bean vẫn không xuất hiện hoặc xuất hiện sai nguồn.
+- **Nguyên nhân:** Không dùng bằng chứng mà cơ chế tự cung cấp về điều kiện khớp/không khớp.
+- **Fix:** Bật debug cho bộ đánh giá điều kiện hoặc đọc báo cáo qua Actuator, tìm đúng auto-configuration và lý do negative match.
+
+### 3. Đặt điều kiện lên class nhưng quên điều kiện lên từng bean
+
+- **Triệu chứng:** Một phần bean của auto-configuration được tạo trong ngữ cảnh không hề có ý định hỗ trợ, ví dụ ứng dụng không phải web.
+- **Nguyên nhân:** Điều kiện mức class chỉ lọc toàn bộ class; các biến thể theo tính năng cần điều kiện mức method.
+- **Fix:** Kết hợp điều kiện mức class cho điều kiện tiên quyết và điều kiện mức bean cho từng tính năng.
+
+### 4. Cho starter kéo theo phụ thuộc cứng không cần thiết
+
+- **Triệu chứng:** Mọi service dùng starter đều bị kéo một thư viện nặng dù chỉ một phần service cần nó.
+- **Nguyên nhân:** Starter gom cả phụ thuộc tuỳ chọn vào danh sách bắt buộc.
+- **Fix:** Đánh dấu phụ thuộc tuỳ chọn đúng phạm vi trong build, và dùng `@ConditionalOnClass` để auto-configuration chỉ kích hoạt khi thư viện thật sự có mặt.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay (viết, vẽ sơ đồ, đọc code) — không có chấm tự động.
+
+1. **Viết code:** Viết một auto-configuration cung cấp một bean định dạng thời gian mặc định, chỉ kích hoạt khi một class định dạng cụ thể có trên classpath và khi người dùng chưa tự định nghĩa bean cùng loại.
+2. **Đọc code trả lời:** Đọc `OutboxAutoConfiguration` ở mục Code và trả lời: nếu ứng dụng tự định nghĩa một bean `OutboxEventWriter` riêng thì điều gì xảy ra, annotation nào đảm bảo điều đó, và nếu gỡ annotation đó ra thì lỗi gì xuất hiện?
+3. **Vẽ sơ đồ:** Vẽ luồng một auto-configuration bị loại ở mức class so với một auto-configuration qua được mức class nhưng một bean bị back-off ở mức method, ghi rõ nơi mỗi kết quả xuất hiện trong condition report.
+4. **Viết tay điều tra:** Viết quy trình 5 bước điều tra tình huống "datasource được tạo từ nguồn không mong muốn" chỉ dùng condition report, danh sách imports và cấu hình hiệu lực, không thử-sai.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Boot — Auto-configuration: https://docs.spring.io/spring-boot/reference/features/developing-auto-configuration.html
+- Spring Boot — Condition Evaluation Report: https://docs.spring.io/spring-boot/reference/features/developing-auto-configuration.html
+- Spring Framework — Conditional Annotations: https://docs.spring.io/spring-framework/reference/core/beans/annotation-config.html
+- Spring Boot — Creating Your Own Starter: https://docs.spring.io/spring-boot/reference/features/developing-auto-configuration.html
+
+## Đọc thêm
+
+Không có.

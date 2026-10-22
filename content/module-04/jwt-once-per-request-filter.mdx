@@ -1,0 +1,240 @@
+---
+title: "JWT với OncePerRequestFilter và SecurityContext"
+module: 4
+level: "Middle"
+duration: 55
+order: 2
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Spring Security 6.3.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Viết được một custom filter kế thừa `OncePerRequestFilter` để đọc, kiểm chứng JWT và điền `SecurityContext`.
+- Giải thích được các claim quan trọng (`sub`, `exp`, `iss`, `aud`, scope/roles) và vì sao phải kiểm tra chữ ký trước khi tin bất kỳ claim nào.
+- Nêu được cách xử lý clock skew, token hết hạn và dọn dẹp `SecurityContext` để không rò rỉ danh tính giữa các request.
+
+## Vì sao cần biết
+
+Tại Nova Loyalty, gateway định tuyến traffic vào các service qua `/v4/{gs,os,ws}/*`, còn mỗi service vẫn phải tự kiểm chứng JWT trước khi xử lý giao dịch điểm. Nếu filter chỉ giải mã phần payload mà không kiểm chứng chữ ký, bất kỳ ai cũng có thể tự chế một token với `sub` là khách hàng khác và rút điểm của họ. Ngược lại, nếu filter kiểm chứng đúng nhưng quên dọn `SecurityContext`, trên cùng một thread xử lý request tiếp theo có thể kế thừa nhầm danh tính trước. Bài này dạy cách làm đúng cả hai đầu: tin token chỉ sau khi verify, và chỉ tin trong phạm vi một request.
+
+## Nội dung chính
+
+### JWT gồm ba phần
+
+Một JWT dạng compact gồm header, payload và signature, ngăn cách bằng dấu chấm và mã hóa Base64URL. Header cho biết thuật toán ký (`alg`) và key id (`kid`). Payload chứa claims. Signature là phần duy nhất giúp phía nhận chứng minh token do issuer đáng tin phát hành và không bị sửa.
+
+Nguyên tắc bất biến: không bao giờ đọc claim để ra quyết định bảo mật trước khi chữ ký và các điều kiện thời gian đã được kiểm chứng.
+
+### Nên ưu tiên OAuth2 Resource Server
+
+Trong Spring Security 6, cách được khuyến nghị cho API là dùng OAuth2 Resource Server với `JwtDecoder`: framework tự tải JWKS từ issuer, chọn đúng key theo `kid`, kiểm chứng chữ ký, `exp`, `iss` và hỗ trợ cache key. Custom filter thủ công chỉ nên dùng khi bạn có yêu cầu đặc thù không nằm trong chuẩn đó, hoặc khi cần hiểu sâu cơ chế bên dưới.
+
+Bài này trình bày một filter thủ công dùng Nimbus JOSE (thư viện đi kèm hệ sinh thái Spring) để bạn thấy rõ từng bước verify, đồng thời giữ cấu trúc để dễ thay bằng decoder chuẩn.
+
+### Claims và ánh xạ authority
+
+Sau khi verify, filter ánh xạ claims thành `Authentication`:
+
+- `sub` là định danh chính (principal), thường là user id hoặc member id.
+- Claim scope (thường là chuỗi cách nhau bằng khoảng trắng hoặc claim `scp`) được biến thành authority dạng `SCOPE_` cộng tên scope.
+- Claim roles tùy biến của từng issuer được biến thành authority dạng `ROLE_` cộng tên role, phục vụ cho `@PreAuthorize` và rule `hasRole`.
+
+Việc ánh xạ phải thống nhất toàn hệ thống. Nếu một service tiền tố khác service kia, cùng một token sẽ cho hai kết quả phân quyền khác nhau.
+
+### OncePerRequestFilter đảm bảo chạy đúng một lần
+
+Một request có thể đi qua nhiều dispatch (REQUEST, ERROR, ASYNC). `OncePerRequestFilter` đảm bảo logic lọc chỉ chạy một lần cho mỗi request bằng cơ chế đánh dấu attribute, tránh verify token hai lần hoặc ghi đè context ở lần dispatch sau.
+
+<Mermaid chart={`sequenceDiagram
+  autonumber
+  Client->>Gateway: GET /v4/gs/wallets/me kem Bearer token
+  Gateway->>Service: Forward request
+  Service->>Filter: Trich header Authorization
+  Filter->>Filter: Verify chu ky, exp, iss, aud
+  alt Token hop le
+    Filter->>Filter: Dien SecurityContext voi principal va authority
+    Filter->>Controller: Cho request di tiep
+  else Token loi hoac het han
+    Filter->>Client: 401 Unauthorized
+  end
+`} label="Luồng verify JWT trong filter: chữ ký và điều kiện thời gian được kiểm tra trước khi SecurityContext được điền." />
+
+### Clock skew và hết hạn
+
+Các máy chủ không đồng hồ tuyệt đối. Khi kiểm chứng `exp` và `nbf`, nên cho phép một độ lệch nhỏ (clock skew) tính bằng giây theo cấu hình của thư viện verify. Độ lệch quá lớn làm cửa sổ dùng token hết hạn bị kéo dài; độ lệch bằng 0 gây 401 oan khi đồng hồ lệch nhẹ. Giá trị cụ thể phải được ghi trong cấu hình và đối chiếu tài liệu của issuer.
+
+> [!WARNING] Cần verify với docs version Spring Security 6.3.x và Nimbus JOSE đang dùng thực tế: tên claim scope chuẩn, cách cấu hình clock skew và hành vi cache JWKS có chi tiết riêng theo từng bản phát hành.
+
+### Dọn dẹp SecurityContext
+
+`SecurityContextHolder` mặc định gắn với thread. Container tái sử dụng thread cho nhiều request, nên context phải được dọn ở cuối mỗi request. Khi dùng filter chain chuẩn của Spring Security, framework có cơ chế dọn dẹp riêng; khi bạn tự set context trong custom code, hãy đảm bảo đường xử lý lỗi cũng không để sót context, và không tự ý truyền context sang thread khác mà không có cơ chế propagation rõ ràng.
+
+## Code
+
+Dependency gợi ý trong `pom.xml`: `spring-boot-starter-security`, `spring-boot-starter-oauth2-resource-server` (kéo theo Nimbus JOSE).
+
+```java filename=JwtAuthenticationFilter.java
+package com.nova.loyalty.security;
+
+import com.nimbusds.jose.JOSEException;
+import com.nimbusds.jose.JWSVerifier;
+import com.nimbusds.jose.crypto.RSASSAVerifier;
+import com.nimbusds.jwt.JWTClaimsSet;
+import com.nimbusds.jwt.SignedJWT;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.security.interfaces.RSAPublicKey;
+import java.text.ParseException;
+import java.util.Date;
+import java.util.List;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.stereotype.Component;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+@Component
+public class JwtAuthenticationFilter extends OncePerRequestFilter {
+
+    private final RSAPublicKey publicKey;
+    private final String expectedIssuer;
+
+    public JwtAuthenticationFilter(RSAPublicKey publicKey, String expectedIssuer) {
+        this.publicKey = publicKey;
+        this.expectedIssuer = expectedIssuer;
+    }
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request,
+                                    HttpServletResponse response,
+                                    FilterChain filterChain)
+            throws ServletException, IOException {
+        String header = request.getHeader("Authorization");
+        if (header == null || !header.startsWith("Bearer ")) {
+            filterChain.doFilter(request, response);
+            return;
+        }
+        String token = header.substring("Bearer ".length()).trim();
+        try {
+            SignedJWT signedJwt = SignedJWT.parse(token);
+            JWSVerifier verifier = new RSASSAVerifier(publicKey);
+            if (!signedJwt.verify(verifier)) {
+                response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                return;
+            }
+            JWTClaimsSet claims = signedJwt.getJWTClaimsSet();
+            if (!expectedIssuer.equals(claims.getIssuer()) || isExpired(claims)) {
+                response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                return;
+            }
+            List<SimpleGrantedAuthority> authorities = extractAuthorities(claims);
+            var authentication = new UsernamePasswordAuthenticationToken(
+                    claims.getSubject(), null, authorities);
+            SecurityContextHolder.getContext().setAuthentication(authentication);
+            filterChain.doFilter(request, response);
+        } catch (ParseException | JOSEException ex) {
+            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+        } finally {
+            SecurityContextHolder.clearContext();
+        }
+    }
+
+    private boolean isExpired(JWTClaimsSet claims) {
+        Date expiration = claims.getExpirationTime();
+        return expiration == null || expiration.before(new Date());
+    }
+
+    private List<SimpleGrantedAuthority> extractAuthorities(JWTClaimsSet claims)
+            throws ParseException {
+        List<String> roles = claims.getStringListClaim("roles");
+        if (roles == null) {
+            return List.of();
+        }
+        return roles.stream()
+                .map(role -> new SimpleGrantedAuthority("ROLE_" + role))
+                .toList();
+    }
+}
+```
+
+Đăng ký filter vào chain trước filter xác thực chuẩn và bật resource server khi có thể:
+
+```java filename=JwtFilterRegistration.java
+package com.nova.loyalty.security;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+
+@Configuration
+public class JwtFilterRegistration {
+
+    @Bean
+    public SecurityFilterChain jwtApiChain(HttpSecurity http,
+                                           JwtAuthenticationFilter jwtFilter) throws Exception {
+        http
+            .securityMatcher("/v4/**")
+            .authorizeHttpRequests(auth -> auth.anyRequest().authenticated())
+            .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)
+            .csrf(csrf -> csrf.disable());
+        return http.build();
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Chỉ decode payload, không verify chữ ký
+
+- **Triệu chứng:** Tự chế token với `sub` bất kỳ vẫn gọi được API.
+- **Nguyên nhân:** Dùng thư viện decode Base64 để đọc claims và tin ngay, bỏ qua bước kiểm chứng signature bằng public key của issuer.
+- **Fix:** Luôn verify chữ ký, `iss`, `aud` và `exp` trước khi dùng bất kỳ claim nào; ưu tiên `JwtDecoder` của Resource Server.
+
+### 2. Không kiểm tra hết hạn và issuer
+
+- **Triệu chứng:** Token cũ đã hết hạn hoặc token từ hệ thống khác vẫn được chấp nhận.
+- **Nguyên nhân:** Filter chỉ kiểm tra chữ ký, quên đối chiếu `exp`, `nbf` và `iss` với issuer kỳ vọng.
+- **Fix:** Kiểm tra đầy đủ điều kiện thời gian với clock skew cấu hình rõ ràng, và pin issuer/audience theo từng môi trường.
+
+### 3. Rò rỉ SecurityContext qua thread tái sử dụng
+
+- **Triệu chứng:** Thỉnh thoảng request không token lại thấy principal của người dùng trước.
+- **Nguyên nhân:** Tự set context nhưng không dọn ở cuối request, container dùng lại thread cho request khác.
+- **Fix:** Đảm bảo context được dọn trong mọi đường đi kể cả khi lỗi, dựa vào cơ chế quản lý context của framework thay vì tự giữ trạng thái.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được; trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay, không có chấm tự động.
+
+1. Liệt kê các bước verify một JWT theo đúng thứ tự an toàn và giải thích vì sao đọc `sub` trước khi verify chữ ký là một lỗi thiết kế.
+2. Viết bảng ánh xạ claims cho Nova Loyalty: `sub`, scope, roles sẽ trở thành principal và authority nào, và rule nào ở tầng service sẽ dùng chúng.
+3. Mô tả kịch bản kiểm thử cho bốn ca: token hợp lệ, token hết hạn trong khoảng clock skew, token sai issuer, token bị sửa payload nhưng giữ nguyên chữ ký cũ.
+4. So sánh hai hướng: dùng OAuth2 Resource Server mặc định và tự viết filter như mục Code; nêu tiêu chí chọn hướng nào cho service mới của Nova.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Security — OAuth2 Resource Server JWT: https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/jwt.html
+- Spring Security — SecurityContextHolder và quản lý context: https://docs.spring.io/spring-security/reference/servlet/authentication/architecture.html
+- RFC 7519 — JSON Web Token (JWT): https://datatracker.ietf.org/doc/html/rfc7519
+
+## Đọc thêm
+
+Không có.
