@@ -6,6 +6,13 @@ Site tĩnh hoàn toàn: không backend, không auth. Progress học tập lưu t
 > Trạng thái: **Phase 2** — đủ 62 bài học cho 12 module theo lesson map cố định.
 > Bài học được phát hiện tự động từ file (data-driven): không cần đăng ký tay vào code.
 
+## Production
+
+- Site: https://java-spring-learning-platform.vercel.app
+- Deploy tự động từ GitHub repo `TriSBie/java-spring-learning-platform`: project Vercel
+  `java-spring-learning-platform` đã nối Git (production branch `main`) — push lên `main`
+  là deploy production. Không deploy bằng upload file thủ công.
+
 ## Chạy local
 
 Yêu cầu: Node.js 18.18+ (đã verify với Node 20/24).

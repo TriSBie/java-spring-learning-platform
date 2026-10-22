@@ -231,13 +231,10 @@ Micrometer concepts (sang docs.micrometer.io), Resilience4j timelimiter → docs
 | Placeholder (Lorem ipsum / TODO / FIXME) trong content + dữ liệu | 0 |
 | Tổng nội dung | 62 bài học · glossary 130 thuật ngữ · 5 cheat sheets (118 dòng) · 9 incident cases |
 
-### Deploy Vercel (2026-10-22) — project đã tạo, deployment CHƯA live (chặn ở tầng quyền/flow)
+### Deploy Vercel (2026-10-22) — đã mở khóa bằng đường GitHub → Vercel Git
 | Hạng mục | Kết quả |
 | --- | --- |
 | Project | Đã tạo: `java-spring-learning-platform` (prj_6xfSF8fA2ET2qRFtFcwhatZRK8UH), framework nextjs, không trùng lặp |
-| Upload file nguồn | 183 file refs (sha1 khớp digest Vercel); `package-lock.json` + `lib/lessons-data.ts` không qua được giới hạn độ dài tham số của connector — đã mô phỏng local: thiếu 2 file này `npm install` + `npm run build` vẫn PASS (prebuild tự sinh lại lessons-data.ts; dependency trong package.json đều ghim version chính xác) |
-| Deployments | 3 lần (dpl_56r4gzRr, dpl_GA3nTeAZ, dpl_zgrXec4) — cả 3 state ERROR |
-| Đối chứng | Project Next.js tối thiểu 4 file deploy bằng đúng flow này cũng ERROR (dpl_6stZHmtY) → lỗi ở flow deploy file-based của môi trường hiện tại, không phải code của platform |
-| Build log | Không đọc được: mọi thao tác đọc theo scope team `trisbies-projects` trả 403 "You must re-authenticate to this scope"; wrapper không có tool `authorize_team_access` (đã kiểm chứng trong danh sách 178 tools) — đúng giới hạn đã ghi trong AGENTS.md |
-| SSO protection | Chưa tắt được (update_project cần team scope → 403); URL deployment đang 302 về vercel.com/sso-api, alias production chưa gán vì chưa có deployment READY — https://java-spring-learning-platform.vercel.app hiện 404 |
-| Đường mở khóa (đã chứng minh end-to-end cùng ngày với job-watcher-mvp + k8s-playground-team) | 1) Tạo repo GitHub trống `TriSBie/java-spring-learning-platform` qua trình duyệt (GitHub App không có quyền tạo repo). 2) Push toàn bộ git history của repo này lên. 3) Trên Vercel dashboard nối repo vào project (Settings → Git → Connect Git Repository) rồi push 1 commit để kích hoạt deploy production. 4) Tắt SSO (Settings → Deployment Protection) và verify lại các route |
+| Flow file-based (bỏ) | 3 deployment ERROR (dpl_56r4gzRr, dpl_GA3nTeAZ, dpl_zgrXec4); project Next.js tối thiểu deploy cùng flow cũng ERROR → lỗi ở flow upload file của môi trường + 403 scope team `trisbies-projects` qua MCP (không đọc được build log) |
+| Đường mở khóa ĐÃ ÁP DỤNG | 1) Tạo repo GitHub `TriSBie/java-spring-learning-platform` qua trình duyệt (GitHub App không có quyền tạo repo). 2) Push toàn bộ source lên `main` qua connector: 189 file, head `a811b39`. 3) Nối repo vào project trên Vercel dashboard (Settings → Git, production branch `main`). 4) Tắt SSO protection trên dashboard. 5) Push commit kích hoạt này (ghi nhận nối Git trong README + mục này) để Vercel tự build production — nối Git xong KHÔNG tự deploy, phải có commit mới |
+| Production | https://java-spring-learning-platform.vercel.app — từ nay push lên `main` là deploy production |
