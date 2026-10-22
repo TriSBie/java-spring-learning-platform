@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Kể đúng thứ tự các pha chính của vòng đời mặc định và giải thích được tính chồng pha.",
+    "Phân biệt được pha, plugin và goal trong mô hình build của Maven.",
+    "Mô tả được vai trò của parent POM trong quản lý phiên bản tập trung cho multi-module.",
+    "Giải thích được thứ tự build giữa các module do reactor suy ra từ quan hệ phụ thuộc.",
+    "Dự đoán được artifact sinh ra ở pha package cho một service Spring Boot.",
+    "Nêu được lý do coi CI là trọng tài cuối cùng khi kết quả build local và CI khác nhau."
+  ],
+  "quiz": [
+    {
+      "answerIndex": 3,
+      "explanation": "Vòng đời của Maven chạy tuần tự từ đầu tới pha được yêu cầu. Yêu cầu verify là đã bao gồm validate, compile, test và package trước nó.",
+      "options": [
+        "Chỉ đúng pha verify",
+        "Chỉ các pha được khai báo trong pom.xml",
+        "Các pha chạy song song ngẫu nhiên",
+        "Mọi pha từ đầu vòng đời tới pha được yêu cầu, theo thứ tự cố định"
+      ],
+      "question": "Khi yêu cầu Maven chạy pha verify, điều gì thực sự diễn ra?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Pha chỉ là cột mốc trong vòng đời; plugin thực thi công việc cụ thể thông qua các goal được gắn vào pha.",
+      "options": [
+        "Ba tên gọi khác nhau của cùng một khái niệm",
+        "Pha là file cấu hình, goal là thư mục đích",
+        "Goal luôn chạy trước pha",
+        "Pha là cột mốc của vòng đời, plugin là thành phần làm việc thật qua các goal gắn vào pha"
+      ],
+      "question": "Quan hệ giữa pha (phase), plugin và goal là gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Pha package đóng gói artifact phân phối được; với Spring Boot, plugin của Boot tái đóng gói thành jar chạy được kèm dependency.",
+      "options": [
+        "validate",
+        "package",
+        "compile",
+        "deploy"
+      ],
+      "question": "Pha nào đóng gói ứng dụng thành artifact phân phối được?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Quản lý phiên bản tập trung ở parent là cách khóa đồng loạt Java 21 và Spring Boot 3.3.x cho mọi service của Nova Loyalty tại một điểm duy nhất.",
+      "options": [
+        "Từng module con tự chọn phiên bản riêng cho linh hoạt",
+        "Chỉ khai báo trong Dockerfile",
+        "Parent POM quản lý tập trung phiên bản qua quản lý dependency và quản lý plugin; module con không ghi lại phiên bản",
+        "Phiên bản được quyết bởi kho lưu trữ local"
+      ],
+      "question": "Trong dự án multi-module, phiên bản dependency nên được quản lý ở đâu?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Reactor sắp xếp thứ tự build dựa trên quan hệ phụ thuộc giữa các module trong cùng dự án, đảm bảo module nền được build trước.",
+      "options": [
+        "Đúng — reactor suy ra thứ tự từ quan hệ phụ thuộc giữa các module",
+        "Sai — thứ tự build là ngẫu nhiên",
+        "Đúng — nhưng chỉ khi mọi module có cùng tên",
+        "Sai — developer phải tự chạy từng module theo đúng thứ tự"
+      ],
+      "question": "Khẳng định 'Maven reactor tự suy ra thứ tự build giữa các module' đúng hay sai?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Vì pha sau bao hàm mọi pha trước, bước verify tự chạy lại test. Thiết kế CI chồng lệnh kiểu này là nguyên nhân phổ biến làm CI chậm gần gấp đôi.",
+      "options": [
+        "Do Maven luôn chạy test hai lần theo thiết kế",
+        "Vì bước chạy tới pha cao hơn tự thực thi lại mọi pha trước nó, gồm cả pha test",
+        "Do CI tự nhân đôi mọi bước",
+        "Do test bị khai báo hai lần trong pom.xml"
+      ],
+      "question": "Vì sao một pipeline có bước mvn test rồi mvn verify lại chạy unit test hai lần?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Pha install cài artifact vào kho local của máy build phục vụ các dự án khác trên cùng máy. Deploy mới là bước đưa lên kho từ xa để chia sẻ rộng rãi.",
+      "options": [
+        "deploy",
+        "verify",
+        "install",
+        "package"
+      ],
+      "question": "Pha nào cài artifact vào kho lưu trữ local?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Artifact lạ hoặc cũ trong kho local làm kết quả build phụ thuộc vào lịch sử của từng máy. Môi trường sạch của CI cho kết quả khách quan và có tính tái lập.",
+      "options": [
+        "Vì máy CI luôn mạnh hơn máy cá nhân",
+        "Vì CI dùng môi trường sạch, không bị kho local nhiễm artifact lạ chi phối kết quả",
+        "Vì developer thường quên lưu file",
+        "Vì Maven trên CI chạy phiên bản khác"
+      ],
+      "question": "Vì sao CI được coi là trọng tài cuối cùng cho kết quả build?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "nova-common là thư viện dùng chung; nova-points và nova-gift phụ thuộc vào nó nên reactor xếp nó lên đầu chuỗi build.",
+      "options": [
+        "nova-points vì nó chứa API chính",
+        "nova-gift vì tên của nó đứng trước theo bảng chữ cái",
+        "nova-common vì các module còn lại phụ thuộc vào nó",
+        "Cả ba build đồng thời không theo thứ tự"
+      ],
+      "question": "Trong cấu trúc Nova Loyalty ở bài, module nào được build đầu tiên?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Kiểm tra rẻ và nhanh phải gắn vào pha sớm để lỗi lộ ra ngay; gắn ở pha muộn khiến pipeline lãng phí toàn bộ thời gian của các pha trước chỉ để phát hiện một lỗi định dạng.",
+      "options": [
+        "Gắn mọi kiểm tra vào pha deploy cho chắc chắn",
+        "Gắn vào pha sớm nhất có thể thực thi nó, để lỗi rẻ tiền lộ ra trước khi tốn thời gian cho các pha sau",
+        "Gắn vào pha test vì đó là pha duy nhất chạy được kiểm tra",
+        "Không gắn vào pha nào, chạy thủ công ngoài Maven"
+      ],
+      "question": "Nên gắn một kiểm tra định dạng mã nguồn rẻ tiền vào pha nào?"
+    }
+  ]
+}

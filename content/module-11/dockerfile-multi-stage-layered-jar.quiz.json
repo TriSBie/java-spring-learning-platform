@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Giải thích được lợi ích của multi-stage build đối với kích thước và an toàn của image.",
+    "Kể được bốn lớp của layered jar và thứ tự copy đúng vào image runtime.",
+    "Viết được Dockerfile multi-stage dùng layertools với người dùng không đặc quyền.",
+    "Giải thích được vì sao entrypoint phải ở dạng exec để Java nhận trực tiếp SIGTERM.",
+    "Dự đoán được layer nào thay đổi khi chỉ sửa code ứng dụng.",
+    "Nêu được cách kiểm chứng image cuối không chứa công cụ build, mã nguồn và không chạy bằng root."
+  ],
+  "quiz": [
+    {
+      "answerIndex": 3,
+      "explanation": "Stage cuối chỉ chứa JRE tối thiểu và artifact cần chạy, không mang theo JDK đầy đủ, Maven hay mã nguồn — nhỏ hơn và ít bề mặt tấn công hơn.",
+      "options": [
+        "Vì image cuối chứa nhiều công cụ hơn",
+        "Vì multi-stage tự nén file jar",
+        "Vì Docker bỏ qua các layer của stage build",
+        "Vì stage runtime chỉ chứa JRE tối thiểu và artifact, tách khỏi công cụ build"
+      ],
+      "question": "Vì sao multi-stage build cho image runtime nhỏ và an toàn hơn?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Spring Boot chia jar thành dependencies, snapshot dependencies, loader và application. Lớp application chứa code của bạn và thay đổi thường xuyên nhất nên copy sau cùng.",
+      "options": [
+        "Chỉ một lớp duy nhất chứa tất cả",
+        "Hai lớp: code và config",
+        "Mỗi dependency là một lớp riêng",
+        "Bốn lớp: dependencies, loader, snapshot dependencies và application"
+      ],
+      "question": "Layered jar của Spring Boot gồm những lớp nào?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Docker cache theo layer theo thứ tự: thay đổi ở một layer làm vô hiệu các layer phía sau nó. Copy layer ổn định trước giúp chúng được giữ trong cache.",
+      "options": [
+        "Đúng — layer ít thay đổi phải copy trước, layer application copy sau cùng",
+        "Sai — thứ tự copy không ảnh hưởng cache",
+        "Đúng — nhưng phải copy application trước tiên",
+        "Sai — chỉ cần copy đúng một lần là đủ"
+      ],
+      "question": "Thứ tự copy các layer vào image cuối ảnh hưởng thế nào tới cache?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Entrypoint dạng mảng JSON chạy Java như tiến trình chính (PID 1 trong container) nên tín hiệu của Kubernetes tới thẳng Java.",
+      "options": [
+        "Để Dockerfile ngắn hơn",
+        "Để Java là tiến trình chính và nhận trực tiếp tín hiệu như SIGTERM",
+        "Để shell có thể ghi log đẹp hơn",
+        "Vì dạng chuỗi không được Docker hỗ trợ"
+      ],
+      "question": "Vì sao entrypoint nên viết ở dạng exec (mảng JSON)?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Layertools là chế độ tích hợp trong chính Spring Boot launcher, dùng để list và extract các layer của jar ngay trong Dockerfile.",
+      "options": [
+        "Một plugin của Kubernetes",
+        "Một daemon riêng chạy cạnh container",
+        "Chế độ của Spring Boot launcher dùng để liệt kê và trích xuất các layer của file jar",
+        "Một tính năng của Maven giúp tải dependency"
+      ],
+      "question": "Layertools trong hệ sinh thái Spring Boot là gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Chạy bằng người dùng chuyên dụng không đặc quyền giảm thiệt hại khi ứng dụng bị khai thác; đây là thực hành bảo mật nền tảng cho container.",
+      "options": [
+        "Chỉ mang tính hình thức",
+        "Giảm mức độ thiệt hại nếu ứng dụng bị khai thác, theo nguyên tắc đặc quyền tối thiểu",
+        "Giúp ứng dụng chạy nhanh hơn",
+        "Bắt buộc để Docker build thành công"
+      ],
+      "question": "Việc tạo người dùng không đặc quyền trong image có ý nghĩa gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Bản thân file jar không thay đổi: điểm khác là Dockerfile tách artifact thành các thư mục layer rồi copy từng phần, thay vì copy nguyên khối vào một layer.",
+      "options": [
+        "Layered jar nén tốt hơn nhiều lần",
+        "Layered jar không cần JRE để chạy",
+        "Dockerfile trích xuất jar thành các thư mục layer và copy từng layer để tận dụng cache",
+        "Layered jar chỉ chạy được trên Kubernetes"
+      ],
+      "question": "Khác biệt thực tế của cách làm layered jar so với copy nguyên jar là gì?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Base image runtime nên là JRE 21 tối thiểu từ nhà cung cấp đáng tin cậy và được vá thường xuyên — JDK đầy đủ chỉ thuộc về stage build.",
+      "options": [
+        "Đúng — JRE 21 tối thiểu, được vá thường xuyên, không chứa công cụ build",
+        "Sai — phải dùng JDK đầy đủ ở runtime để debug",
+        "Đúng — nhưng nên dùng image hệ điều hành đầy đủ nhất có thể",
+        "Sai — base image không ảnh hưởng tới bảo mật"
+      ],
+      "question": "Stage runtime nên dùng base image nào cho Nova Loyalty trên Java 21?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Module khóa phiên bản ở Java 21 và Spring Boot 3.3.x; Dockerfile phải bám đúng cặp phiên bản này ở cả stage build và runtime.",
+      "options": [
+        "Java 8 và Spring Boot 2.7",
+        "Java 21 và Spring Boot 3.3.x",
+        "Java 17 và Spring Boot 3.0",
+        "Bất kỳ phiên bản nào mới nhất tại thời điểm build"
+      ],
+      "question": "Cặp phiên bản nền tảng của nền tảng học này là gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "src chứa mã nguồn chỉ thuộc về stage build. Image cuối chứa mã nguồn vừa phình to vừa lộ tài sản trí tuệ và có thể chứa dữ liệu nhạy cảm.",
+      "options": [
+        "Để tăng tốc độ build",
+        "Vì mã nguồn giúp debug ở production",
+        "Vì image production chỉ nên chứa những gì cần để chạy; mã nguồn làm tăng kích thước và lộ bề mặt không cần thiết",
+        "Vì Docker cấm copy thư mục src"
+      ],
+      "question": "Vì sao không nên copy thư mục mã nguồn vào stage runtime?"
+    }
+  ]
+}

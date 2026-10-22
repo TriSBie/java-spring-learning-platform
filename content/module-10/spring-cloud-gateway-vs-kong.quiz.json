@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Định nghĩa được route gồm id, URI, predicate và filter trong Spring Cloud Gateway.",
+    "Viết được route bằng YAML và bằng RouteLocator Java cho cùng một nhu cầu.",
+    "So sánh được Spring Cloud Gateway và Kong trên ít nhất 4 trục kiến trúc/vận hành.",
+    "Giải thích được vì sao không được đưa logic nghiệp vụ loyalty vào gateway.",
+    "Mô tả được bài toán SNAT làm mất client IP và vai trò có điều kiện của header chuyển tiếp.",
+    "Đưa ra được quyết định gateway cho Nova Loyalty kèm điều kiện đảo ngược quyết định."
+  ],
+  "quiz": [
+    {
+      "answerIndex": 3,
+      "explanation": "Predicate quyết định route có khớp request hay không (path, header, method...); filter mới là thành phần biến đổi request/response trên đường đi.",
+      "options": [
+        "Filter quyết định route có khớp request hay không",
+        "Predicate tự gọi xuống backend",
+        "Cả hai đều chỉ dùng để ghi log",
+        "Predicate quyết định route có khớp request hay không, filter biến đổi request/response"
+      ],
+      "question": "Trong Spring Cloud Gateway, predicate và filter khác nhau ở điểm nào?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Nova Loyalty dùng ba nhóm tiền tố /v4/gs, /v4/os, /v4/ws phía sau gateway — đây là dữ kiện gốc để thiết kế predicate.",
+      "options": [
+        "/api/v1/*",
+        "/loyalty/** duy nhất cho mọi service",
+        "Không có tiền tố cố định",
+        "/v4/{gs,os,ws}/* phân theo nhóm service"
+      ],
+      "question": "Tiền tố định tuyến hiện tại của Nova Loyalty tại gateway là gì?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Thực hiện I/O chặn trên luồng reactive sẽ chiếm giữ event loop và làm sụp thông lượng — lỗi kinh điển khi viết custom filter.",
+      "options": [
+        "Filter thực hiện lời gọi chặn (blocking) trên luồng reactive",
+        "Filter dùng quá nhiều bộ nhớ cache",
+        "Filter có tên dài",
+        "Filter được khai báo bằng YAML thay vì Java"
+      ],
+      "question": "Sai lầm nghiêm trọng nhất khi viết custom filter cho gateway reactive là gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Kong chạy độc lập khỏi JVM và hệ sinh thái cấu hình của service, phục vụ tốt kiến trúc đa ngôn ngữ nhưng thêm một stack vận hành riêng.",
+      "options": [
+        "Kong là thư viện Java chạy trong cùng JVM với service",
+        "Kong chỉ hoạt động với Spring Boot",
+        "Kong là gateway độc lập với hệ sinh thái plugin và cấu hình riêng, không gắn với ngôn ngữ của service",
+        "Kong thay thế hoàn toàn load balancer"
+      ],
+      "question": "Điểm khác biệt nền tảng của Kong so với Spring Cloud Gateway là gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Chỉ header từ các proxy đã kiểm soát mới đáng tin; client có thể tự bịa header nếu gateway tin mọi nguồn — lỗ hổng kinh điển khi xử lý X-Forwarded-For.",
+      "options": [
+        "Luôn tin vì header này không thể giả mạo",
+        "Chỉ tin khi request đến qua đúng chuỗi proxy tin cậy đã cấu hình",
+        "Bỏ qua hoàn toàn và cấm mọi proxy",
+        "Dùng địa chỉ của gateway làm client IP"
+      ],
+      "question": "Nên xử lý header X-Forwarded-For thế nào khi có SNAT phía sau load balancer?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Route khai báo bằng Java có thể được kiểm thử như code thường và tái sử dụng predicate tùy biến — đổi lại route bớt trực quan với người vận hành.",
+      "options": [
+        "YAML luôn nhanh hơn Java",
+        "Java bắt buộc cho mọi route",
+        "Java phù hợp khi cần logic khớp phức tạp và unit test cho route",
+        "YAML không được Spring Cloud Gateway hỗ trợ"
+      ],
+      "question": "Khi nào định tuyến bằng Java RouteLocator phù hợp hơn YAML?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Cộng điểm, quy đổi quà là luật nghiệp vụ thuộc service; gateway chỉ nên giữ routing, auth ở edge và các quan tâm cắt ngang thuần kỹ thuật.",
+      "options": [
+        "Đúng vậy — gateway chứa luật nghiệp vụ sẽ thành điểm nghẽn thay đổi và deploy",
+        "Đúng, và nên cộng điểm ngay tại gateway cho nhanh",
+        "Sai hoàn toàn, gateway không bao giờ được chứa bất kỳ filter nào",
+        "Chỉ sai khi dùng Kong"
+      ],
+      "question": "Vì sao không nên đặt luật cộng điểm/đổi quà vào gateway?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "SNAT nằm ở tầng mạng/load balancer phía trước gateway. Thay gateway mà không xử lý chuỗi proxy và header thì địa chỉ nguồn vẫn là của thiết bị mạng.",
+      "options": [
+        "Đúng, gateway mới sẽ tự khôi phục client IP",
+        "Sai — mất client IP do SNAT là bài toán của cả chuỗi proxy/LB, không tự hết khi đổi gateway",
+        "Đúng nếu bật thêm Actuator",
+        "Sai vì Kafka sẽ khôi phục IP"
+      ],
+      "question": "Khẳng định 'đổi sang Spring Cloud Gateway sẽ tự sửa lỗi mất client IP' đúng hay sai?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Khi hệ sinh thái gồm nhiều ngôn ngữ/stack, một gateway độc lập như Kong thường thắng thế so với gateway gắn chặt vào Spring.",
+      "options": [
+        "Toàn bộ backend là Java và route cần đi cùng pipeline test của service",
+        "Team muốn viết filter bằng Java",
+        "Hệ thống có nhiều stack ngoài Java và cần plugin edge có sẵn phong phú, vận hành độc lập",
+        "Chỉ có một service duy nhất"
+      ],
+      "question": "Trường hợp nào nghiêng về giữ Kong cho Nova Loyalty?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Migrate gateway chạm vào mọi đường vào của hệ thống — rủi ro cao. Quyết định cần dữ kiện vận hành thật và điều kiện đảo ngược rõ ràng, không dựa trên sở thích.",
+      "options": [
+        "Hỏi ý kiến cộng đồng rồi chọn theo đa số",
+        "Có bằng chứng về nhu cầu thực tế, chi phí vận hành hai lựa chọn và điều kiện đảo ngược quyết định",
+        "Chọn công nghệ mới hơn theo năm phát hành",
+        "Chọn theo ngôn ngữ của gateway"
+      ],
+      "question": "Quyết định gateway nên dựa trên cơ sở nào?"
+    }
+  ]
+}

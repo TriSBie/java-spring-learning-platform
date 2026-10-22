@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Viết được Deployment, Service, Ingress hoàn chỉnh với selector và nhãn khớp nhau.",
+    "Phân biệt được hậu quả khi readiness thất bại so với khi liveness thất bại.",
+    "Nối được probes tới đúng health group liveness và readiness của Actuator.",
+    "Giải thích được vì sao liveness không được kiểm tra phụ thuộc bên ngoài như database.",
+    "Suy ra được tham số thời gian của probe từ hành vi khởi động thật của ứng dụng.",
+    "Thiết kế được readiness hợp lý cho service có nhiều datasource như Nova Loyalty."
+  ],
+  "quiz": [
+    {
+      "answerIndex": 3,
+      "explanation": "Readiness thất bại chỉ rút pod khỏi danh sách nhận traffic của Service. Liveness thất bại liên tục mới khiến Kubernetes giết và tạo lại container.",
+      "options": [
+        "Pod bị giết và tạo lại ngay",
+        "Toàn bộ Deployment bị xóa",
+        "Ingress tự động đổi route sang service khác",
+        "Pod bị rút khỏi danh sách nhận traffic của Service nhưng không bị giết"
+      ],
+      "question": "Khi readiness probe thất bại, điều gì xảy ra với pod?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Health group liveness của Actuator chỉ phản ánh trạng thái sống nội tại của ứng dụng — đúng thứ liveness probe cần, không lẫn phụ thuộc bên ngoài.",
+      "options": [
+        "Nhóm health tổng hợp mọi phụ thuộc",
+        "Nhóm metrics",
+        "Nhóm info",
+        "Nhóm liveness chỉ phản ánh trạng thái sống nội tại của ứng dụng"
+      ],
+      "question": "Liveness probe nên trỏ tới health group nào của Actuator?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Đó là sự cố oan kinh điển: một sự cố phụ thuộc bị khuếch đại thành sự cố toàn hệ vì mọi pod đều bị giết cùng lúc và không pod nào kịp phục vụ kể cả khi database hồi phục.",
+      "options": [
+        "Đúng — mọi pod bị giết dây chuyền khi database chập chờn, biến sự cố phụ thuộc thành sự cố toàn hệ thống",
+        "Sai — đây là cách làm được khuyến nghị",
+        "Đúng — nhưng chỉ khi dùng Ingress",
+        "Sai — liveness không bao giờ khởi động lại container"
+      ],
+      "question": "Khẳng định 'đặt liveness kiểm tra database sẽ gây khởi động lại dây chuyền' đúng hay sai?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Startup probe bảo vệ giai đoạn khởi động: chừng nào nó chưa thành công, các probe khác chưa bắt đầu đếm thất bại — sạch hơn việc nới lỏng liveness cho mọi giai đoạn.",
+      "options": [
+        "Tăng số replica",
+        "Startup probe — nó vô hiệu các probe khác cho tới khi ứng dụng khởi động xong lần đầu",
+        "Cho pod nhiều RAM hơn",
+        "Dùng Ingress thay cho Service"
+      ],
+      "question": "Cơ chế nào của Kubernetes sinh ra để bảo vệ ứng dụng khởi động chậm?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Nova Loyalty phân nhóm API theo tiền tố /v4/gs, /v4/os, /v4/ws phía sau gateway/ingress — manifest phải ánh xạ đúng các tiền tố này.",
+      "options": [
+        "/api/points/**",
+        "/internal/**",
+        "/v4/os/** cho nhóm online service (cùng họ với /v4/gs và /v4/ws)",
+        "/health/**"
+      ],
+      "question": "Tiền tố Ingress nào khớp với kiến trúc hiện tại của Nova Loyalty?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Service định tuyến tới pod qua selector. Lệch nhãn nghĩa là không có đầu cuối nào phía sau Service dù pod vẫn chạy — kiểm tra danh sách đầu cuối là bước chẩn đoán đầu tiên.",
+      "options": [
+        "Sai phiên bản API của Ingress",
+        "Selector của Service không khớp nhãn trên pod template",
+        "Thiếu biến môi trường timezone",
+        "Image chưa được đẩy lên registry"
+      ],
+      "question": "Pod chạy khỏe nhưng Service không có đầu cuối nào — nguyên nhân cấu hình kinh điển nhất là gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Readiness nên phản ánh các phụ thuộc mà thiếu nó request chắc chắn thất bại, ví dụ datasource core. Kiểm tra cả các datasource phụ trợ sẽ rút traffic của service chính vì lỗi không liên quan.",
+      "options": [
+        "Không kiểm tra phụ thuộc nào cả",
+        "Kiểm tra toàn bộ 5 datasource trong mọi trường hợp",
+        "Kiểm tra các phụ thuộc trọng yếu cho luồng nghiệp vụ của service đó, ví dụ datasource core với service điểm",
+        "Chỉ kiểm tra dung lượng đĩa"
+      ],
+      "question": "Readiness của service điểm tại Nova Loyalty nên kiểm tra điều gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Thời gian phát hiện treo tối đa xấp xỉ độ trễ ban đầu cộng tích của chu kỳ kiểm tra với ngưỡng thất bại — con số phải được suy ra và ghi lại khi thiết kế probe.",
+      "options": [
+        "Chỉ phụ thuộc vào số replica",
+        "Bởi độ trễ ban đầu, chu kỳ kiểm tra và ngưỡng số lần thất bại liên tiếp",
+        "Chỉ phụ thuộc vào kích thước image",
+        "Không thể suy ra từ manifest"
+      ],
+      "question": "Thời gian để liveness phát hiện một pod treo được quyết định bởi đâu?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Thuật ngữ đúng trong Kubernetes là đầu cuối (endpoints) của Service. Selector rỗng hoặc lệch nhãn là nguyên nhân hàng đầu khiến danh sách này trống.",
+      "options": [
+        "Danh sách node của cluster",
+        "Danh sách image trong registry",
+        "Danh sách đầu cuối (endpoints) mà Service đang định tuyến tới",
+        "Danh sách secret của namespace"
+      ],
+      "question": "Khi điều tra lỗi Service không nhận traffic, cần kiểm tra danh sách nào đầu tiên?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Deployment đảm bảo trạng thái mong muốn về số replica và thực hiện rolling update khi template thay đổi; Service và Ingress không quản lý vòng đời pod.",
+      "options": [
+        "Đúng — Deployment đảm bảo số replica và thực thi rolling update khi template thay đổi",
+        "Sai — Service mới quản lý vòng đời pod",
+        "Đúng — nhưng chỉ cho ứng dụng không trạng thái dạng cron",
+        "Sai — Ingress quản lý vòng đời pod"
+      ],
+      "question": "Khẳng định 'Deployment quản lý vòng đời và số lượng pod' đúng hay sai?"
+    }
+  ]
+}

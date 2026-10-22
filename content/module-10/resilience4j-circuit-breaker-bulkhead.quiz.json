@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Giải thích được ba trạng thái Closed, Open, HalfOpen và điều kiện chuyển trạng thái.",
+    "Cấu hình được circuit breaker bằng YAML gồm ngưỡng lỗi, ngưỡng chậm, cửa sổ và thời gian chờ.",
+    "Cấu hình được bulkhead dạng semaphore với giới hạn riêng cho từng dependency.",
+    "Viết được fallback method đúng chữ ký kèm tham số exception và có test cho đường fallback.",
+    "Phân biệt được exception nên ghi nhận và exception nên bỏ qua của breaker.",
+    "Phân tích được kịch bản cascading failure và vị trí đặt breaker/bulkhead để chặn nó."
+  ],
+  "quiz": [
+    {
+      "answerIndex": 3,
+      "explanation": "Ở trạng thái Open, breaker từ chối ngay bằng exception chuyên dụng mà không chạm tới đối tác, giúp đối tác có thời gian hồi phục và giải phóng tài nguyên phía gọi.",
+      "options": [
+        "Tiếp tục gọi đối tác nhưng ghi log nhiều hơn",
+        "Chuyển mọi request sang hàng đợi vô hạn",
+        "Tắt toàn bộ service",
+        "Từ chối ngay lập tức mà không gọi đối tác, để đối tác có thời gian hồi phục"
+      ],
+      "question": "Khi circuit breaker ở trạng thái Open, lời gọi được xử lý thế nào?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Lời gọi chậm chiếm giữ thread/connection lâu dài và là nguyên nhân chính của sụp đổ dây chuyền, nên Resilience4j cho phép coi chậm như một dạng lỗi qua hai ngưỡng này.",
+      "options": [
+        "sliding-window-size",
+        "permitted-number-of-calls-in-half-open-state",
+        "register-health-indicator",
+        "slow-call-duration-threshold và slow-call-rate-threshold"
+      ],
+      "question": "Cặp tham số nào biến 'lời gọi chậm' thành tín hiệu mở breaker?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Nova Loyalty cần fallback nghiệp vụ đã được chấp nhận: số dư cache có đánh dấu stale, hoặc xếp yêu cầu vào hàng đợi xử lý bù — không phải dữ liệu bịa lặng lẽ.",
+      "options": [
+        "Trả số dư đã cache kèm đánh dấu dữ liệu có thể cũ, hoặc xếp yêu cầu vào hàng đợi xử lý sau",
+        "Trả số dư bằng 0 để giao diện không lỗi",
+        "Tự cộng điểm ước lượng",
+        "Ẩn lỗi và báo thành công giả"
+      ],
+      "question": "Fallback tốt cho thao tác lấy số dư điểm khi CRM sập nên làm gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Fallback được tra cứu qua cơ chế proxy/annotation; sai chữ ký thường chỉ nổ lúc runtime. Vì vậy phải có test ép đường fallback chạy thật.",
+      "options": [
+        "Fallback sai chữ ký luôn bị trình biên dịch chặn",
+        "Fallback sai chữ ký có thể chỉ phát hiện được lúc runtime khi breaker mở",
+        "Fallback không cần khớp kiểu trả về",
+        "Fallback luôn chạy trên thread riêng nên không lỗi"
+      ],
+      "question": "Vì sao lỗi chữ ký fallback method đặc biệt nguy hiểm?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Bulkhead giới hạn mức đồng thời theo từng dependency: một đối tác chậm chỉ được chiếm phần sức chứa đã cấp cho nó, không nuốt sức chứa của dependency khác.",
+      "options": [
+        "Đếm tỷ lệ lỗi theo thời gian",
+        "Tự động mở khi tỷ lệ lỗi vượt ngưỡng",
+        "Giới hạn số lời gọi đồng thời vào một dependency để nó không nuốt hết sức chứa của cả service",
+        "Mã hóa dữ liệu truyền đi"
+      ],
+      "question": "Bulkhead bảo vệ hệ thống theo cơ chế nào?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Nếu không có số liệu tối thiểu, vài lời gọi lỗi ngẫu nhiên lúc lưu lượng thấp có thể mở breaker oan và chặn cả traffic khỏe.",
+      "options": [
+        "wait-duration-in-open-state",
+        "minimum-number-of-calls",
+        "max-concurrent-calls",
+        "failure-rate-threshold đặt một mình"
+      ],
+      "question": "Tham số nào tránh việc breaker mở oan khi lưu lượng quá thấp?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Lỗi validation do client gửi sai dữ liệu không nói lên sức khỏe đối tác. Tính nó vào tỷ lệ lỗi sẽ làm breaker mở oan.",
+      "options": [
+        "Timeout khi gọi CRM",
+        "Lỗi kết nối tới đối tác",
+        "Lỗi validation do client gửi dữ liệu sai",
+        "Lỗi 5xx từ đối tác"
+      ],
+      "question": "Exception nào nên được đưa vào danh sách bỏ qua của breaker?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "HalfOpen là giai đoạn thăm dò có kiểm soát: một số ít lời gọi thử quyết định breaker đóng lại hay mở tiếp, tránh dội toàn bộ traffic vào đối tác vừa hồi phục.",
+      "options": [
+        "Breaker tắt hoàn toàn mọi giám sát",
+        "Breaker cho một số ít lời gọi thử đi qua để quyết định đóng lại hay mở tiếp",
+        "Mọi request đều được nhân đôi",
+        "Bulkhead tự động tăng giới hạn"
+      ],
+      "question": "Trạng thái HalfOpen có vai trò gì?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Annotation của Spring Cloud Circuit Breaker hoạt động qua proxy/AOP; method tự gọi nội bộ trong cùng bean sẽ bỏ qua proxy nên breaker không hề chạy.",
+      "options": [
+        "Đúng — lời gọi nội bộ cùng class bỏ qua proxy nên annotation không có tác dụng",
+        "Sai — annotation luôn chạy kể cả khi tự gọi nội bộ",
+        "Đúng — nhưng chỉ vì thiếu Actuator",
+        "Sai — cần thêm Kafka mới chạy"
+      ],
+      "question": "Khẳng định 'đặt annotation lên method rồi tự gọi nội bộ trong cùng class vẫn được bảo vệ' đúng hay sai?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Bài học khóa phiên bản ở Resilience4j 2.x đi cùng Spring Cloud 2023.0.x và Spring Boot 3.3.x.",
+      "options": [
+        "Resilience4j 1.x",
+        "Resilience4j 2.x",
+        "Hystrix bản mới nhất",
+        "Không cần thư viện chịu lỗi"
+      ],
+      "question": "Dòng phiên bản Resilience4j được dùng trong bài là gì?"
+    }
+  ]
+}

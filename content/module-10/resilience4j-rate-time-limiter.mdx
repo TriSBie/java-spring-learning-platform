@@ -1,0 +1,199 @@
+---
+title: "Resilience4j — Rate Limiter, Time Limiter và thứ tự aspect"
+module: 10
+level: "Senior"
+duration: 50
+order: 4
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Spring Cloud 2023.0.x", "Resilience4j 2.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Cấu hình được `@RateLimiter` và `@TimeLimiter` của Resilience4j 2.x với các tham số cửa sổ làm mới, giới hạn cho phép và timeout.
+- Giải thích được vì sao `@TimeLimiter` yêu cầu kiểu trả về bất đồng bộ và điều gì xảy ra nếu áp dụng sai cho method đồng bộ.
+- Dự đoán được hành vi khi xếp chồng nhiều annotation chịu lỗi trên cùng một method dựa trên thứ tự aspect, và thiết kế được chính sách bảo vệ API đối tác của Nova Loyalty.
+
+## Vì sao cần biết
+
+Nova Loyalty mở API cho đối tác bên ngoài tra cứu điểm và đổi quà. Một đối tác lỗi vòng lặp retry có thể dội lượng request gấp nhiều lần bình thường trong vài phút, đủ để kéo sập cả các đối tác khỏe và người dùng cuối nếu không có giới hạn tần suất ở tầng service. Ngược lại, ở chiều gọi ra, một thao tác phụ thuộc vào hệ thống chậm bên ngoài mà không có giới hạn thời gian sẽ giữ thread và connection vô thời hạn. Rate limiter bảo vệ chiều vào và chiều ra theo hạn ngạch, time limiter đặt trần thời gian cho từng lời gọi, và thứ tự xếp chồng với circuit breaker/bulkhead quyết định cơ chế nào nhìn thấy request trước. Ở cấp Senior, bạn phải dự đoán được hành vi tổng hợp này trước khi nó chạy ở production.
+
+## Nội dung chính
+
+### Rate limiter: hạn ngạch theo cửa sổ thời gian
+
+Rate limiter của Resilience4j giới hạn số lời gọi được phép trong một khoảng thời gian làm mới (`limitRefreshPeriod`), với số lượng cho phép mỗi chu kỳ là `limitForPeriod`. Tham số `timeoutDuration` quyết định request vượt hạn ngạch sẽ chờ tối đa bao lâu để xin một slot ở chu kỳ kế tiếp trước khi bị từ chối: đặt bằng 0 nghĩa là từ chối ngay.
+
+Ba câu hỏi thiết kế phải trả lời trước khi đặt con số: hạn ngạch tính theo service, theo đối tác hay theo API key? Vượt hạn ngạch thì từ chối ngay hay cho chờ ngắn? Và hạn ngạch này bảo vệ tài nguyên nào — thread, connection tới database, hay hạn ngạch phía đối tác áp lên Nova Loyalty?
+
+### Time limiter: trần thời gian cho lời gọi bất đồng bộ
+
+Time limiter đặt giới hạn thời gian thực thi cho một lời gọi và có thể yêu cầu hủy tác vụ nền khi quá hạn qua tham số `cancelRunningFuture`. Điểm bắt buộc phải nhớ: với Spring AOP, `@TimeLimiter` chỉ hoạt động đúng với method trả về kiểu bất đồng bộ như `CompletableFuture`. Áp dụng lên method đồng bộ thông thường sẽ không cho hiệu quả mong đợi — lỗi thiết kế này thường bị phát hiện muộn vì ứng dụng vẫn chạy, chỉ là không có giới hạn thời gian thật.
+
+Với lời gọi đồng bộ, giới hạn thời gian thực tế nằm ở timeout của HTTP client (connect timeout và read timeout) kết hợp với ngưỡng gọi chậm của circuit breaker — bài trước đã đề cập. Đừng tạo cảm giác an toàn giả bằng một annotation không có hiệu lực.
+
+<Mermaid chart={`flowchart TB
+  Req[Request từ đối tác] --> RL[RateLimiter<br/>còn hạn ngạch?]
+  RL -->|hết hạn ngạch| Reject[Từ chối / chờ ngắn]
+  RL -->|còn| BH[Bulkhead<br/>còn slot đồng thời?]
+  BH --> CB[CircuitBreaker<br/>mạch đang đóng?]
+  CB --> TL[TimeLimiter / client timeout]
+  TL --> Down[Dependency bên ngoài]`} label="Chuỗi bảo vệ một lời gọi theo thứ tự aspect khuyến nghị của Resilience4j: rate limiter ở ngoài cùng, time limiter ở trong cùng." />
+
+### Xếp chồng annotation và thứ tự aspect
+
+Khi một method mang nhiều annotation chịu lỗi, thứ tự các aspect bao quanh lời gọi quyết định ngữ nghĩa tổng thể. Thứ tự mặc định được Resilience4j khuyến nghị (từ ngoài vào trong) là: Retry, CircuitBreaker, RateLimiter, TimeLimiter, Bulkhead — cần lưu ý đây là thứ tự bọc ngoài vào trong theo tài liệu của Resilience4j, và khía cạnh nằm ngoài cùng sẽ nhìn thấy request đầu tiên.
+
+> [!WARNING] Cần verify với docs version Resilience4j 2.x đang dùng: tên chính xác của các khóa cấu hình thứ tự aspect (thuộc nhóm `resilience4j.*.aspect-order` trong Spring Boot integration) và thứ tự mặc định nên được đối chiếu với tài liệu của đúng bản thư viện trước khi ghi vào tài liệu vận hành của team.
+
+Hệ quả thực hành quan trọng nhất: nếu rate limiter nằm ngoài circuit breaker, request bị breaker từ chối vẫn có thể đã tiêu tốn hạn ngạch — hoặc ngược lại tùy thứ tự bạn chọn. Không có thứ tự đúng tuyệt đối; có thứ tự phù hợp với chính sách bạn muốn. Nhiệm vụ của người thiết kế là nói rõ chính sách đó.
+
+Thứ tự cũng có thể tùy biến qua cấu hình aspect order của Spring Boot integration. Chỉ đổi khi có lý do viết thành văn bản, vì người đọc code sau này sẽ mặc định giả thiết thứ tự chuẩn.
+
+### Bảo vệ API đối tác tại Nova Loyalty
+
+Áp dụng vào Nova Loyalty, chính sách hợp lý gồm ba lớp: gateway giới hạn tần suất thô theo đối tác ở tầng edge; rate limiter ở service siết chặt theo hạn ngạch hợp đồng của từng nhóm đối tác; và ở chiều gọi ra tới CRM/đối tác quà tặng, rate limiter chiều ra tôn trọng hạn ngạch mà phía bên kia áp lên Nova Loyalty để tránh bị khóa tài khoản tích hợp. Kèm theo đó, mọi lời gọi ra đều có trần thời gian rõ ràng, bằng time limiter cho đường bất đồng bộ hoặc bằng timeout của HTTP client `RestClient` cho đường đồng bộ.
+
+Lưu ý thêm về SNAT: khi Nova Loyalty nằm sau load balancer có SNAT, địa chỉ IP nguồn không còn là định danh đáng tin của đối tác. Giới hạn tần suất theo IP sẽ gộp mọi đối tác vào một rổ — phải giới hạn theo định danh xác thực (API key / client id) thay vì theo IP.
+
+## Code
+
+Cấu hình YAML cho rate limiter và time limiter:
+
+```yaml filename=application-ratelimit.yml
+resilience4j:
+  ratelimiter:
+    instances:
+      partnerApi:
+        limit-refresh-period: 1s
+        limit-for-period: 50
+        timeout-duration: 0ms
+      crmOutbound:
+        limit-refresh-period: 1s
+        limit-for-period: 20
+        timeout-duration: 250ms
+  timelimiter:
+    instances:
+      partnerAsync:
+        timeout-duration: 3s
+        cancel-running-future: true
+```
+
+API đối tác được bảo vệ bằng rate limiter, fallback trả về kết quả suy giảm tường minh:
+
+```java filename=PartnerPointsController.java
+package com.nova.loyalty.partner;
+
+import io.github.resilience4j.ratelimiter.annotation.RateLimiter;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/partner/points")
+public class PartnerPointsController {
+
+    private final PartnerPointsService pointsService;
+
+    public PartnerPointsController(PartnerPointsService pointsService) {
+        this.pointsService = pointsService;
+    }
+
+    @GetMapping("/{memberId}")
+    @RateLimiter(name = "partnerApi", fallbackMethod = "rateLimitFallback")
+    public ResponseEntity<PointsBalanceView> getBalance(@PathVariable Long memberId) {
+        PointsBalanceView view = pointsService.findBalance(memberId);
+        return ResponseEntity.ok(view);
+    }
+
+    public ResponseEntity<PointsBalanceView> rateLimitFallback(Long memberId, Throwable ex) {
+        PointsBalanceView view = new PointsBalanceView(memberId, null, "RATE_LIMITED");
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).body(view);
+    }
+}
+```
+
+Đường bất đồng bộ dùng time limiter kết hợp circuit breaker; thứ tự aspect do framework quyết định, method trả về `CompletableFuture`:
+
+```java filename=PartnerAsyncService.java
+package com.nova.loyalty.partner;
+
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import io.github.resilience4j.timelimiter.annotation.TimeLimiter;
+import java.util.concurrent.CompletableFuture;
+import org.springframework.stereotype.Service;
+
+@Service
+public class PartnerAsyncService {
+
+    private final GiftCatalogClient giftCatalogClient;
+
+    public PartnerAsyncService(GiftCatalogClient giftCatalogClient) {
+        this.giftCatalogClient = giftCatalogClient;
+    }
+
+    @TimeLimiter(name = "partnerAsync", fallbackMethod = "catalogFallback")
+    @CircuitBreaker(name = "partnerAsync", fallbackMethod = "catalogFallback")
+    public CompletableFuture<GiftCatalogView> loadCatalog(String partnerId) {
+        return CompletableFuture.supplyAsync(() -> giftCatalogClient.fetchCatalog(partnerId));
+    }
+
+    public CompletableFuture<GiftCatalogView> catalogFallback(String partnerId, Throwable ex) {
+        return CompletableFuture.completedFuture(GiftCatalogView.unavailable(partnerId));
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Giới hạn tần suất theo IP khi hệ thống nằm sau SNAT
+
+- **Triệu chứng:** Một đối tác gửi quá hạn ngạch nhưng toàn bộ đối tác khác cũng bị chặn, hoặc ngược lại không đối tác nào bị chặn đúng hạn ngạch của mình.
+- **Nguyên nhân:** Sau load balancer có SNAT, mọi request đều mang cùng địa chỉ nguồn của thiết bị mạng; IP không còn định danh được đối tác.
+- **Fix:** Giới hạn theo định danh đã xác thực như API key hoặc client id ở tầng service/gateway; chỉ dùng IP cho lớp chống lạm dụng thô ở edge khi đã hiểu rõ chuỗi proxy.
+
+### 2. Áp TimeLimiter lên method đồng bộ rồi tưởng đã có trần thời gian
+
+- **Triệu chứng:** Dependency treo nhiều phút nhưng không hề có timeout nào kích hoạt; thread bị giữ vô thời hạn.
+- **Nguyên nhân:** `@TimeLimiter` với Spring AOP cần kiểu trả về bất đồng bộ; method đồng bộ không được bao bởi cơ chế giới hạn thời gian này.
+- **Fix:** Với đường đồng bộ, đặt connect/read timeout ở HTTP client (dùng `RestClient`) và ngưỡng gọi chậm ở circuit breaker; chỉ dùng `@TimeLimiter` cho method trả về `CompletableFuture` và có test chứng minh timeout thật sự kích hoạt.
+
+### 3. Xếp chồng annotation mà không biết thứ tự aspect
+
+- **Triệu chứng:** Số liệu giám sát khó hiểu: hạn ngạch bị tiêu tốn bởi request đã bị breaker từ chối, hoặc retry tự động khuếch đại lượng request vượt xa hạn ngạch đã tính.
+- **Nguyên nhân:** Không ai ghi lại thứ tự aspect đang hiệu lực và hệ quả của nó lên chính sách bảo vệ.
+- **Fix:** Ghi rõ thứ tự aspect đã chọn kèm lý do trong tài liệu thiết kế; đo bằng metric của từng cơ chế và chỉ tùy biến aspect order khi có lý do viết thành văn bản.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Tính hạn ngạch:** Một đối tác của Nova Loyalty được cam kết tối đa 3.000 request mỗi phút cho API tra điểm. Đề xuất cấu hình rate limiter (chu kỳ làm mới, giới hạn mỗi chu kỳ, timeout chờ) bám sát cam kết này và nêu đánh đổi giữa chu kỳ ngắn và chu kỳ dài.
+2. **Đọc code trả lời:** Đọc `PartnerAsyncService` ở mục Code: nếu `giftCatalogClient.fetchCatalog` chạy quá 3 giây thì điều gì xảy ra với future đang chạy và fallback nhận được gì? Nếu đổi kiểu trả về thành đồng bộ thì cơ chế nào mất hiệu lực?
+3. **Dự đoán thứ tự:** Cho một method mang đồng thời retry, circuit breaker và rate limiter: viết hai kịch bản hành vi khác nhau ứng với hai thứ tự aspect khác nhau, và chọn một thứ tự cho API đối tác của Nova Loyalty kèm lý do.
+4. **Thiết kế chính sách:** Viết chính sách bảo vệ hoàn chỉnh cho API đối tác của Nova Loyalty gồm 3 lớp (edge, service chiều vào, chiều gọi ra) — mỗi lớp ghi rõ cơ chế, định danh áp dụng và hành vi khi vượt ngưỡng.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Resilience4j — Documentation, RateLimiter: https://resilience4j.readme.io/docs/ratelimiter
+- Resilience4j — Documentation, TimeLimiter: https://resilience4j.readme.io/docs/timeout
+- Spring Cloud Circuit Breaker — Reference Documentation: https://docs.spring.io/spring-cloud-circuitbreaker/reference/
+
+## Đọc thêm
+
+Không có.

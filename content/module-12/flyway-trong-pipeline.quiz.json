@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Giải thích được ba lý do migration chạy trong pipeline thay vì lúc ứng dụng khởi động.",
+    "Áp dụng được quy ước đặt tên migration 14 chữ số và nguyên tắc bất biến của migration đã chạy.",
+    "Mô tả được vai trò của bảng lịch sử và checksum trong kiểm chứng của Flyway.",
+    "Thiết kế được thứ tự migrate cho 5 datasource và hành vi dừng ngay khi một datasource thất bại.",
+    "Phát biểu được kỷ luật tương thích hai chiều cho cửa sổ giữa migrate và triển khai ứng dụng mới.",
+    "Mô tả được quy trình xử lý khi migration thất bại mà không sửa tay lặng lẽ trên production."
+  ],
+  "quiz": [
+    {
+      "answerIndex": 3,
+      "explanation": "Chạy trong pipeline cho tính đơn điểm theo thời gian, điểm dừng rõ ràng khi lỗi và thứ tự kiểm soát được so với việc triển khai ứng dụng.",
+      "options": [
+        "Vì ứng dụng không thể chứa thư viện Flyway",
+        "Để pipeline chạy chậm hơn cho an toàn",
+        "Vì Kubernetes cấm chạy migration trong pod",
+        "Để migration chạy đúng một lần bởi một tác nhân tại thời điểm xác định, tách lỗi schema khỏi lỗi ứng dụng và kiểm soát thứ tự so với triển khai"
+      ],
+      "question": "Lý do cốt lõi khiến Nova Loyalty chạy Flyway trong pipeline là gì?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Tiền tố 14 chữ số là dấu thời gian đầy đủ (năm tới giây) — thứ tự dứt khoát, tránh đụng độ số phiên bản khi nhiều người làm song song.",
+      "options": [
+        "Số thứ tự 2 chữ số",
+        "Mã hash của nội dung file",
+        "Số của ticket yêu cầu thay đổi",
+        "Dấu thời gian 14 chữ số theo năm, tháng, ngày, giờ, phút, giây"
+      ],
+      "question": "Quy ước đặt tên migration của Nova Loyalty dùng tiền tố phiên bản nào?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Một khi đã áp dụng ở môi trường dùng chung, file migration là một phần của lịch sử. Sửa nó sẽ làm lệch checksum và phá vỡ tính nhất quán giữa các môi trường.",
+      "options": [
+        "Đúng — migration đã chạy là bất biến; thay đổi phải đi qua một migration mới",
+        "Sai — có thể sửa nếu thay đổi nhỏ",
+        "Đúng — nhưng chỉ áp dụng cho datasource core",
+        "Sai — chỉ tên file là bất biến, nội dung sửa được"
+      ],
+      "question": "Khẳng định 'migration đã chạy thì không được sửa nội dung' đúng hay sai?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Flyway đối chiếu checksum của file hiện tại với giá trị đã ghi lúc áp dụng. Lệch checksum là bằng chứng một file đã chạy bị can thiệp và quá trình phải dừng.",
+      "options": [
+        "Dung lượng database vượt ngưỡng",
+        "Checksum của file migration hiện tại không khớp với checksum đã ghi trong bảng lịch sử khi áp dụng",
+        "Tên file chứa ký tự đặc biệt",
+        "Số lượng migration vượt giới hạn"
+      ],
+      "question": "Lỗi lệch checksum của Flyway báo hiệu điều gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "5 datasource của Nova Loyalty là core, gift, report, legacy và audit — không dùng JTA, mỗi datasource có tập migration và bảng lịch sử riêng.",
+      "options": [
+        "core, gift, report, billing, search",
+        "core, gift, cache, legacy, audit",
+        "core, gift, report, legacy, audit",
+        "core, crm, report, legacy, audit"
+      ],
+      "question": "Năm datasource của Nova Loyalty là những datasource nào?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Dừng ngay là hành vi đúng: tiếp tục sẽ tạo ra trạng thái nửa vời giữa các datasource và che giấu điểm gãy thật cần điều tra trước khi đi tiếp.",
+      "options": [
+        "Bỏ qua và tiếp tục các datasource còn lại",
+        "Dừng toàn bộ bước migrate, xác định trạng thái thật của datasource gãy và không triển khai ứng dụng mới",
+        "Tự động chạy ngược mọi migration đã xong",
+        "Đánh dấu pipeline thành công để triển khai kịp tiến độ"
+      ],
+      "question": "Khi migrate cho một datasource thất bại giữa chừng, pipeline nên làm gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Đó là kỷ luật tương thích hai chiều: schema mới phải phục vụ được cả ứng dụng cũ trong cửa sổ triển khai. Thay đổi phá vỡ phải chia nhiều bước qua nhiều bản phát hành.",
+      "options": [
+        "Ứng dụng mới được triển khai trước migration",
+        "Không tồn tại cửa sổ như vậy",
+        "Ứng dụng cũ vẫn chạy trên schema mới — migration bắt buộc phải tương thích ngược với phiên bản đang chạy",
+        "Kubernetes tự đồng bộ hai phía"
+      ],
+      "question": "Cửa sổ giữa lúc migrate xong và lúc ứng dụng mới lên chạy đặt ra yêu cầu gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Thêm cột cho phép rỗng, thêm bảng mới và thêm chỉ mục là các thay đổi cộng thêm không phá vỡ code đang chạy — thuộc nhóm an toàn cho cửa sổ triển khai.",
+      "options": [
+        "Đổi tên cột mà code đang dùng",
+        "Thêm cột mới cho phép rỗng và thêm chỉ mục",
+        "Xóa cột không còn thấy trong giao diện",
+        "Thắt chặt ràng buộc không rỗng lên cột đang có dữ liệu rỗng"
+      ],
+      "question": "Thay đổi schema nào an toàn nhất cho cửa sổ triển khai?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Không có nút khôi phục schema vạn năng. Xử lý đúng gồm xác định trạng thái thật, sửa bằng migration mới hoặc quy trình được ghi chép, và lưu lại bài học cho team.",
+      "options": [
+        "Xóa bảng lịch sử của Flyway cho sạch",
+        "Sửa tay trực tiếp trên production rồi quên đi",
+        "Xác định trạng thái thật của database, dừng triển khai, xử lý bằng migration mới hoặc quy trình sửa chữa được ghi chép",
+        "Chạy lại pipeline nhiều lần cho tới khi tự qua"
+      ],
+      "question": "Cách xử lý đúng khi một migration gãy ở production là gì?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Flyway tắt phía ứng dụng tránh hai chủ sở hữu cùng chạy migration. Tại Nova Loyalty, chủ sở hữu duy nhất là pipeline — cần tắt tường minh thay vì trông vào mặc định.",
+      "options": [
+        "Đúng — hai chủ sở hữu cùng migrate gây tranh khóa và áp dụng hai đường; phải chốt pipeline là chủ sở hữu duy nhất và tắt phía ứng dụng",
+        "Sai — chạy hai nơi càng an toàn",
+        "Đúng — nhưng chỉ cần tắt ở môi trường dev",
+        "Sai — tranh khóa không thể xảy ra"
+      ],
+      "question": "Khẳng định 'pipeline và ứng dụng cùng tự migrate là nguy hiểm' đúng hay sai?"
+    }
+  ]
+}

@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Thiết kế được dashboard theo thứ tự điều tra sự cố với 4 hàng rõ vai trò.",
+    "Viết được truy vấn phân vị độ trễ, heap, pool và consumer lag từ metrics có thật.",
+    "Đóng gói và nhập lại được dashboard dạng JSON vào Grafana.",
+    "Dùng được biến mẫu để một dashboard phục vụ nhiều service và datasource.",
+    "Nhận diện được panel trang trí và tín hiệu giả do mẫu số nhỏ.",
+    "Đặt được ngưỡng tham chiếu và hành động gợi ý cho từng panel quan trọng."
+  ],
+  "quiz": [
+    {
+      "question": "Tiêu chí quan trọng nhất của một panel trên dashboard ca trực là gì?",
+      "options": [
+        "Màu sắc đẹp",
+        "Trả lời một câu hỏi vận hành cụ thể và gợi ra hành động khi bất thường",
+        "Chiếm nhiều diện tích",
+        "Dùng loại đồ thị hiếm gặp"
+      ],
+      "answerIndex": 1,
+      "explanation": "Panel không gợi hành động là trang trí. Dashboard ca trực được chấm bằng tốc độ khoanh vùng sự cố, không phải vẻ đẹp."
+    },
+    {
+      "question": "Vì sao panel tỉ lệ lỗi phải đi cùng panel lưu lượng?",
+      "options": [
+        "Để dashboard cân đối",
+        "Vì Grafana bắt buộc",
+        "Để phân biệt lỗi thật trên tải lớn với tỉ lệ giả cao trên mẫu số quá nhỏ",
+        "Để tiết kiệm panel"
+      ],
+      "answerIndex": 2,
+      "explanation": "Tỉ lệ không có ngữ cảnh mẫu số sẽ đánh lừa ca trực, đặc biệt vào giờ thấp điểm của Nova."
+    },
+    {
+      "question": "Consumer lag tăng ngay sau deploy có thể là hiện tượng gì trước tiên cần kiểm chứng?",
+      "options": [
+        "Consumer đang draining và khởi động lại theo kế hoạch, cần đối chiếu cửa sổ triển khai",
+        "Chắc chắn là tắc nghẽn nghiêm trọng",
+        "Database đã đầy",
+        "Gateway sai route"
+      ],
+      "answerIndex": 0,
+      "explanation": "Lag phải được đọc theo ngữ cảnh vận hành: deploy và draining 75 giây của CRM consumer tạo lag tạm thời có chủ đích."
+    },
+    {
+      "question": "Lợi ích của biến mẫu service trong dashboard là gì?",
+      "options": [
+        "Làm JSON dài hơn",
+        "Tự động tạo metrics mới",
+        "Thay thế hệ thống cảnh báo",
+        "Một dashboard dùng chung cho nhiều service mà không sao chép và sửa tay từng bản"
+      ],
+      "answerIndex": 3,
+      "explanation": "Biến mẫu biến dashboard thành sản phẩm dùng lại được, giảm sai lệch giữa các bản sao cho từng service."
+    },
+    {
+      "question": "Vì sao dashboard nên được lưu dạng JSON trong repo?",
+      "options": [
+        "Để Grafana chạy nhanh hơn",
+        "Để thay đổi dashboard được review, có lịch sử và khôi phục được như code",
+        "Vì Grafana không có giao diện sửa",
+        "Để ẩn dashboard khỏi ca trực"
+      ],
+      "answerIndex": 1,
+      "explanation": "Dashboard as code giúp mọi thay đổi có lý do, được review và đồng bộ giữa các môi trường."
+    },
+    {
+      "question": "Panel heap nào cho tín hiệu đáng lo hơn?",
+      "options": [
+        "Heap dao động răng cưa và hạ sau mỗi chu kỳ thu gom",
+        "Heap dùng ở mức thấp ổn định",
+        "Heap bằng đúng một nửa trần trong giờ cao điểm",
+        "Heap tăng đều, sau thu gom vẫn không hạ và tiến dần tới trần"
+      ],
+      "answerIndex": 3,
+      "explanation": "Đường chân heap sau thu gom tăng đều là dấu hiệu object sống tích lũy, khác hẳn dao động khỏe mạnh theo tải."
+    },
+    {
+      "question": "Khi pool của một datasource nghẽn, panel nào khoanh vùng nhanh nhất?",
+      "options": [
+        "Panel CPU tổng của node",
+        "Panel số lượng pod",
+        "Panel connection đang hoạt động và thread chờ tách theo tên pool",
+        "Panel lưu lượng HTTP tổng"
+      ],
+      "answerIndex": 2,
+      "explanation": "Chiều tách theo tên pool chỉ thẳng datasource gây nghẽn trong 5 datasource, rút ngắn bước khoanh vùng đầu tiên."
+    },
+    {
+      "question": "Đặt cùng một cửa sổ thời gian cho toàn dashboard quan trọng vì lý do gì?",
+      "options": [
+        "Để tương quan giữa nghiệp vụ, JVM, pool và lag đều hợp lệ trên cùng một sự cố",
+        "Để mọi panel đẹp như nhau",
+        "Vì Grafana không cho đặt khác nhau",
+        "Để giảm tải truy vấn"
+      ],
+      "answerIndex": 0,
+      "explanation": "Tương quan sai cửa sổ thời gian là nguồn kết luận sai kinh điển trong điều tra sự cố."
+    },
+    {
+      "question": "Đơn vị hiển thị sai trên panel độ trễ gây hậu quả gì?",
+      "options": [
+        "Không có hậu quả",
+        "Grafana tự sửa đơn vị",
+        "Ca trực đọc nhầm mili giây thành giây và ra quyết định sai mức độ nghiêm trọng",
+        "Chỉ ảnh hưởng thẩm mỹ"
+      ],
+      "answerIndex": 2,
+      "explanation": "Đơn vị là một phần của dữ liệu. Nhầm đơn vị trong lúc sự cố biến dashboard thành nguồn gây hại."
+    },
+    {
+      "question": "Bước cuối để một dashboard mới được coi là hoàn thành là gì?",
+      "options": [
+        "Vẽ xong và chụp ảnh lưu trữ",
+        "Thử dùng nó điều tra một sự cố mẫu hoặc sự cố đã qua và sửa những điểm làm chậm khoanh vùng",
+        "Chia sẻ link cho toàn công ty",
+        "Đặt làm trang chủ Grafana"
+      ],
+      "answerIndex": 1,
+      "explanation": "Dashboard phải được kiểm chứng bằng bài toán thật: ca trực dùng nó tìm ra tầng sự cố nhanh hơn cách cũ."
+    }
+  ]
+}

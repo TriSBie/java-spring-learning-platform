@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Giải thích được vai trò của Config Server và Config Client trong kiến trúc Spring Cloud.",
+    "Phân biệt được config import hiện đại với bootstrap context đời cũ.",
+    "Cấu hình được client lấy cấu hình theo application name, profile và label kèm fail-fast.",
+    "Đánh giá được khi nào nên và không nên dùng @RefreshScope.",
+    "Nêu được lý do không đưa secret plaintext lên Git của Config Server.",
+    "Mô tả được chiến lược retry và sẵn sàng cao cho Config Server trên đường khởi động."
+  ],
+  "quiz": [
+    {
+      "answerIndex": 3,
+      "explanation": "Từ Spring Boot 2.4, config data API là cơ chế chuẩn; với Spring Cloud hiện nay client khai báo spring.config.import dạng configserver:... thay vì dựa vào bootstrap context đời cũ.",
+      "options": [
+        "Tạo thư mục bootstrap riêng không cần import",
+        "Copy file cấu hình vào từng service lúc build",
+        "Đọc cấu hình qua biến môi trường duy nhất",
+        "Dùng khóa spring.config.import trỏ tới Config Server"
+      ],
+      "question": "Cách khai báo được khuyến nghị hiện nay để Config Client lấy cấu hình từ Config Server là gì?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Release train Spring Cloud 2023.0.x được xây dựng để tương thích với Spring Boot 3.3.x — luôn nêu rõ cặp phiên bản này khi báo cáo môi trường.",
+      "options": [
+        "Spring Boot 2.7.x",
+        "Spring Boot 4.x",
+        "Spring Boot 1.5.x",
+        "Spring Boot 3.3.x"
+      ],
+      "question": "Spring Cloud 2023.0.x tương thích với dòng Spring Boot nào theo bài học?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "RefreshScope tạo lại bean giữa lúc ứng dụng đang chạy. Bean dữ liệu thuần thì an toàn; bean giữ pool, connection hoặc cache ấm có thể gây hành vi khó lường.",
+      "options": [
+        "Làm tăng kích thước image",
+        "Bean bị hủy và tạo lại khi refresh, nguy hiểm nếu bean giữ state hoặc tài nguyên như connection",
+        "Bắt buộc phải dùng Kafka",
+        "Không tương thích với Actuator"
+      ],
+      "question": "Trade-off chính của @RefreshScope là gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Datasource và connection pool là tài nguyên hạ tầng có vòng đời riêng; thay đổi chúng cần rolling restart có kiểm soát, không phải refresh nóng.",
+      "options": [
+        "Thông điệp bảo trì hiển thị cho người dùng",
+        "Feature flag bật tắt đổi quà",
+        "URL và pool size của các datasource HikariCP",
+        "Số ngày báo trước khi điểm hết hạn"
+      ],
+      "question": "Nhóm cấu hình nào KHÔNG nên kỳ vọng refresh động tại Nova Loyalty?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Fail-fast giúp lỗi cấu hình lộ ra ngay lúc khởi động thay vì âm thầm chạy sai môi trường — đặc biệt nguy hiểm nếu giá trị mặc định trỏ về dev.",
+      "options": [
+        "Service khởi động nhanh hơn bình thường",
+        "Service dừng khởi động nếu không lấy được cấu hình bắt buộc thay vì chạy với giá trị mặc định sai",
+        "Config Server trả lỗi 404 cho mọi request",
+        "Client bỏ qua mọi profile"
+      ],
+      "question": "Fail-fast trong Config Client có ý nghĩa gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Lịch sử Git gần như không thể xóa sạch bí mật đã commit. Secret cần hệ thống chuyên dụng với vòng đời và quyền truy cập riêng.",
+      "options": [
+        "Commit secret plaintext vì repo là private",
+        "Mã hóa qua loa rồi commit cả khóa giải mã cùng chỗ",
+        "Không đưa secret thật lên Git; dùng Kubernetes Secret hoặc hệ thống quản lý secret chuyên dụng inject lúc runtime",
+        "Đổi tên file thành .hidden là đủ an toàn"
+      ],
+      "question": "Đâu là cách xử lý secret đúng khi dùng Config Server với backend Git?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Label mặc định thường là branch chính; client có thể yêu cầu label cụ thể để ghim vào một trạng thái cấu hình đã kiểm chứng.",
+      "options": [
+        "Tên developer",
+        "Branch hoặc tag của repository cấu hình",
+        "Số thứ tự của service",
+        "Region triển khai"
+      ],
+      "question": "Label trong Config Server thường ánh xạ tới khái niệm nào của backend Git?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Actuator env cho thấy property source nào đang thắng và giá trị hiệu lực, giúp gỡ lỗi drift cấu hình có bằng chứng thay vì đoán.",
+      "options": [
+        "Đoán qua tên file",
+        "Dùng Actuator endpoint env để xem nguồn và giá trị của từng khóa",
+        "Chỉ nhìn log dòng đầu tiên",
+        "Hỏi người deploy"
+      ],
+      "question": "Làm sao kiểm chứng cấu hình hiệu lực sau khi service khởi động?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Retry có backoff chỉ xử lý sự cố thoáng qua. Nếu Config Server nằm trên đường khởi động của mọi service, nó vẫn cần được chạy ở chế độ sẵn sàng cao.",
+      "options": [
+        "Thay thế hoàn toàn nhu cầu chạy Config Server sẵn sàng cao",
+        "Chống dao động mạng ngắn khi nhiều service khởi động đồng loạt, dùng backoff để tránh dồn dập",
+        "Tự động sửa cấu hình sai",
+        "Cho phép bỏ qua fail-fast"
+      ],
+      "question": "Retry khi lấy cấu hình lúc khởi động có tác dụng gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Một điểm quản lý duy nhất kèm lịch sử versioning giúp phát hiện và truy vết thay đổi cấu hình — vấn đề lớn nhất khi cấu hình rải rác theo từng repo.",
+      "options": [
+        "Xóa bỏ nhu cầu dùng profile",
+        "Giảm drift giữa môi trường và có truy vết thay đổi cấu hình qua versioning của backend",
+        "Tự động sinh code nghiệp vụ",
+        "Thay thế hoàn toàn CI/CD"
+      ],
+      "question": "Khi số service tăng, lợi ích cốt lõi của quản lý cấu hình tập trung là gì?"
+    }
+  ]
+}

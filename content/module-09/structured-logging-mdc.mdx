@@ -1,0 +1,182 @@
+---
+title: "Structured Logging, MDC và Vệ Sinh Log"
+module: 9
+level: "Middle"
+duration: 45
+order: 4
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Micrometer 1.13.x", "OpenTelemetry Java 1.4x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Cấu hình được Logback xuất log dạng JSON có cấu trúc trên Spring Boot 3.3, gồm các trường chuẩn của Nova Loyalty.
+- Dùng đúng `MDC` để gắn định danh truy vết và định danh request vào mọi dòng log trong một luồng xử lý, và dọn sạch MDC đúng lúc.
+- Áp dụng được quy tắc vệ sinh log: không ghi dữ liệu nhạy cảm, không ghi ở mức sai, không tạo log trùng lặp vô ích trong vòng lặp nóng.
+
+## Vì sao cần biết
+
+Khi Nova Loyalty còn ghi log dạng text tự do, việc tìm mọi dòng liên quan tới một giao dịch điểm xuyên gateway và 5 datasource là mò kim đáy bể: mỗi service một định dạng, không có định danh chung. Sau khi SNAT sau load balancer làm mất IP thật của client, log càng là nơi duy nhất còn giữ được dấu vết điều tra nếu được thiết kế đúng. Structured logging biến mỗi dòng log thành một bản ghi có trường truy vấn được; MDC gắn định danh truy vết và request vào mọi dòng trong cùng luồng, nối log với trace của bài trước thành một vòng điều tra khép kín.
+
+## Nội dung chính
+
+### Từ dòng text tới bản ghi có trường
+
+Log có cấu trúc là JSON hoặc cặp khóa giá trị nhất quán trên mọi service.
+Các trường chuẩn gồm thời gian, mức log, tên service, định danh truy vết, định danh request và thông điệp.
+Trường nghiệp vụ như loại giao dịch và kết quả được thêm dạng trường riêng, không nhồi vào chuỗi thông điệp.
+Nhờ vậy hệ thống tập hợp log có thể lọc, đếm và cảnh báo theo trường thay vì bóc tách text mong manh.
+Chuỗi thông điệp vẫn cần dễ đọc cho con người khi xem log thô trong lúc sự cố.
+
+### MDC: ngữ cảnh theo luồng xử lý
+
+MDC là bản đồ ngữ cảnh gắn với thread đang xử lý.
+Filter ở biên vào đặt định danh request và định danh truy vết vào MDC ngay khi request tới.
+Mọi dòng log trong luồng đó tự mang theo các định danh này qua mẫu định dạng.
+Khi xử lý bất đồng bộ hoặc chuyển thread, ngữ cảnh không tự đi theo: phải sao chép tường minh sang luồng mới.
+Kết thúc xử lý phải dọn MDC để thread dùng chung không rò ngữ cảnh sang request tiếp theo.
+
+<Mermaid chart={`flowchart LR
+  Req[Request qua gateway] --> F[Filter dat MDC: traceId, requestId]
+  F --> S[Service xu ly va ghi log]
+  S --> A[Task bat dong bo: sao chep MDC tuong minh]
+  A --> C[Don sach MDC khi ket thuc]`} label="Vòng đời MDC trong một luồng xử lý tại Nova Loyalty" />
+
+### Vệ sinh log: những điều không được ghi
+
+Tuyệt đối không ghi token, mật khẩu, dữ liệu thanh toán hay thông tin cá nhân không cần thiết.
+Không ghi toàn bộ payload của đối tác vào log ở mức thông tin thường trực.
+Mức log phải đúng nghĩa: lỗi thật sự cần hành động mới ở mức lỗi, diễn biến bình thường ở mức thông tin, chi tiết gỡ lỗi ở mức debug và tắt trên production.
+Vòng lặp nóng ghi log từng phần tử là cách nhanh nhất làm ngập đĩa và che mất tín hiệu thật.
+Sự cố mất IP client do SNAT nhắc ta ghi định danh tương quan thay vì trông chờ địa chỉ mạng.
+
+Để log thật sự dùng được khi điều tra, team cần một thỏa ước chung gồm các điểm sau.
+
+- Danh sách trường chuẩn bắt buộc và ý nghĩa chính xác của từng trường trên mọi service.
+- Danh sách trường bị cấm ghi vì lý do bảo mật và tuân thủ, kèm cách che dữ liệu khi bắt buộc phải ghi ngữ cảnh.
+- Quy ước đặt tên trường thống nhất, tránh mỗi service một kiểu viết cho cùng một khái niệm.
+- Ngân sách dung lượng log theo service để chi phí tập hợp và lưu trữ không tăng vô kiểm soát.
+- Quy trình review mẫu log thật sau mỗi đợt phát hành lớn, đối chiếu với thỏa ước trên.
+
+Thỏa ước này nên sống trong repo dưới dạng tài liệu ngắn và được kiểm chứng bằng giao dịch mẫu tự động.
+Một trường bị thiếu hoặc viết lệch tên sẽ làm truy vấn điều tra trả về thiếu dữ liệu mà không báo lỗi nào.
+Đó là loại lỗi lặng lẽ nguy hiểm nhất của hệ thống log.
+
+Ghi nhớ nhanh: một dòng log tốt tự trả lời được bốn câu hỏi.
+Việc gì đã xảy ra, thuộc hành trình nào, kết quả ra sao, và có cần con người hành động hay không.
+
+Đọc lại checklist của bài và tự chấm trung thực trước khi chuyển sang bài tiếp theo trong module.
+Mọi khoảng trống kiến thức lộ ra lúc này đều rẻ hơn rất nhiều so với khi nó lộ ra trong một sự cố production.
+
+## Code
+
+Cấu hình nằm trong `logback-spring.xml` và `application.yml`. Dependencies trong `pom.xml`: encoder JSON cho Logback theo lựa chọn của nền tảng; cần verify artifact với đúng phiên bản Spring Boot 3.3 đang dùng.
+
+```xml filename=logback-spring.xml
+<configuration>
+    <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <includeMdcKeyName>traceId</includeMdcKeyName>
+            <includeMdcKeyName>requestId</includeMdcKeyName>
+            <includeMdcKeyName>memberRef</includeMdcKeyName>
+            <customFields>{"service":"nova-points-api"}</customFields>
+        </encoder>
+    </appender>
+    <root level="INFO">
+        <appender-ref ref="JSON" />
+    </root>
+</configuration>
+```
+
+```java filename=MdcFilter.java
+package com.nova.loyalty.observe;
+
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.util.UUID;
+import org.slf4j.MDC;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
+import org.springframework.stereotype.Component;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+@Component
+@Order(Ordered.HIGHEST_PRECEDENCE)
+public class MdcFilter extends OncePerRequestFilter {
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request,
+                                    HttpServletResponse response,
+                                    FilterChain filterChain)
+            throws ServletException, IOException {
+        String requestId = request.getHeader("X-Request-Id");
+        if (requestId == null || requestId.isBlank()) {
+            requestId = UUID.randomUUID().toString();
+        }
+        MDC.put("requestId", requestId);
+        String traceId = request.getHeader("traceparent");
+        if (traceId != null && !traceId.isBlank()) {
+            MDC.put("traceId", traceId);
+        }
+        try {
+            filterChain.doFilter(request, response);
+        } finally {
+            MDC.clear();
+        }
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Quên dọn MDC sau khi xử lý xong
+
+- **Triệu chứng:** Log của request sau mang định danh của request trước, điều tra đi sai hướng hoàn toàn.
+- **Nguyên nhân:** Thread trong pool được dùng lại trong khi MDC của request cũ vẫn còn nguyên.
+- **Fix:** Dọn sạch MDC trong khối finally ở cùng filter đã đặt nó, không giao việc dọn cho code nghiệp vụ.
+
+### 2. Ghi dữ liệu nhạy cảm để tiện gỡ lỗi
+
+- **Triệu chứng:** Log chứa token và thông tin cá nhân, biến hệ thống log thành rủi ro tuân thủ nghiêm trọng.
+- **Nguyên nhân:** Thói quen ghi toàn bộ request và response mà không qua danh sách trường được phép.
+- **Fix:** Chỉ ghi các trường đã được duyệt, che hoặc bỏ hẳn dữ liệu nhạy cảm, và review log như review code.
+
+### 3. Mọi thứ đều ghi ở mức lỗi
+
+- **Triệu chứng:** Kênh cảnh báo từ log bị nhiễu tới mức đội trực bỏ qua cả lỗi thật.
+- **Nguyên nhân:** Mức log được dùng theo cảm xúc của người viết thay vì theo nhu cầu hành động của người đọc.
+- **Fix:** Chuẩn hóa ý nghĩa từng mức trong tài liệu của team và kiểm chứng bằng tỉ lệ lỗi trong log sau mỗi đợt phát hành.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Cấu hình:** Viết mẫu log JSON đích cho một giao dịch điểm thành công và một giao dịch thất bại, liệt kê mọi trường và lý do từng trường tồn tại.
+2. **Đọc code:** Chỉ ra điều gì xảy ra với MDC khi luồng xử lý chuyển sang một task bất đồng bộ tự quản lý thread, và viết cách sao chép ngữ cảnh đúng.
+3. **Vệ sinh:** Cho một đoạn log mẫu chứa 5 vấn đề vệ sinh, gạch chân từng vấn đề và viết lại đoạn log đạt chuẩn.
+4. **Phản biện:** Vì sao không nên trông chờ địa chỉ IP trong log để tương quan request tại Nova? Thiết kế định danh thay thế của bạn là gì?
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Boot — Logging: https://docs.spring.io/spring-boot/reference/features/logging.html
+- Spring Framework — Web MVC và Filters: https://docs.spring.io/spring-framework/reference/web/webmvc.html
+- OpenTelemetry — Documentation: https://opentelemetry.io/docs/
+
+## Đọc thêm
+
+Không có.

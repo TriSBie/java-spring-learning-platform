@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Cấu hình được Logback xuất JSON với các trường chuẩn và trường MDC đã chọn.",
+    "Đặt và dọn MDC đúng vòng đời cho luồng xử lý đồng bộ qua filter.",
+    "Xử lý được việc sao chép ngữ cảnh MDC khi chuyển sang xử lý bất đồng bộ.",
+    "Áp dụng được danh sách vệ sinh log cho dữ liệu nhạy cảm và mức log.",
+    "Tương quan được log với trace bằng cùng định danh truy vết.",
+    "Giải thích được vì sao định danh tương quan quan trọng hơn địa chỉ mạng sau SNAT."
+  ],
+  "quiz": [
+    {
+      "question": "MDC là cơ chế gì?",
+      "options": [
+        "Một database nhỏ trong JVM",
+        "Bản đồ ngữ cảnh gắn với thread đang xử lý, được mẫu log tự động đưa vào mọi dòng log của luồng đó",
+        "Một loại encoder JSON",
+        "Hàng đợi log bất đồng bộ"
+      ],
+      "answerIndex": 1,
+      "explanation": "MDC giúp mọi dòng log trong một luồng tự mang định danh chung mà không cần truyền tham số qua từng method."
+    },
+    {
+      "question": "Việc bắt buộc khi kết thúc xử lý một request là gì với MDC?",
+      "options": [
+        "Để nguyên cho request sau dùng lại",
+        "Sao chép MDC vào database",
+        "Dọn sạch MDC trong khối đảm bảo luôn chạy, tránh rò ngữ cảnh sang thread được tái sử dụng",
+        "Tắt logger của thread"
+      ],
+      "answerIndex": 2,
+      "explanation": "Thread pool tái sử dụng thread cho nhiều request. Không dọn MDC là lỗi tương quan log kinh điển và rất khó phát hiện."
+    },
+    {
+      "question": "Khi chuyển sang xử lý bất đồng bộ, MDC cư xử thế nào?",
+      "options": [
+        "Không tự đi theo, phải sao chép ngữ cảnh tường minh sang luồng xử lý mới",
+        "Tự đi theo task sang thread mới",
+        "Biến mất khỏi cả thread gốc",
+        "Được JVM đồng bộ tự động"
+      ],
+      "answerIndex": 0,
+      "explanation": "MDC gắn với thread. Mọi bước nhảy thread — executor, reactive, hàng đợi — đều cần chiến lược mang ngữ cảnh tường minh."
+    },
+    {
+      "question": "Trường nào nên là trường riêng trong log JSON thay vì nhồi vào thông điệp?",
+      "options": [
+        "Mức log",
+        "Tên service",
+        "Dấu thời gian",
+        "Các dữ kiện cần lọc và đếm như loại giao dịch, kết quả và tên datasource"
+      ],
+      "answerIndex": 3,
+      "explanation": "Trường riêng mới truy vấn và tổng hợp được. Thông điệp dành cho con người đọc, trường dành cho máy phân tích."
+    },
+    {
+      "question": "Quy tắc vệ sinh quan trọng nhất với dữ liệu nhạy cảm là gì?",
+      "options": [
+        "Ghi đầy đủ để điều tra cho dễ",
+        "Không ghi token, mật khẩu và dữ liệu cá nhân không cần thiết; chỉ ghi trường đã được duyệt",
+        "Mã hóa log bằng thuật toán tự chế",
+        "Chỉ ghi dữ liệu nhạy cảm vào ban đêm"
+      ],
+      "answerIndex": 1,
+      "explanation": "Log được sao chép, lưu lâu và nhiều người xem hơn dữ liệu gốc. Rò rỉ qua log là một trong các rò rỉ khó thu hồi nhất."
+    },
+    {
+      "question": "Vì sao địa chỉ IP không phải định danh tương quan đáng tin tại Nova?",
+      "options": [
+        "Vì IPv6 quá dài",
+        "Vì log không lưu được địa chỉ IP",
+        "Vì gateway cấm ghi IP",
+        "Vì SNAT sau load balancer làm mất IP thật của client, nhiều client dùng chung một địa chỉ nguồn"
+      ],
+      "answerIndex": 3,
+      "explanation": "Đó là lý do Nova gắn định danh request và định danh truy vết ngay ở biên vào thay vì truy vết theo địa chỉ mạng."
+    },
+    {
+      "question": "Mức log lỗi nên dành cho trường hợp nào?",
+      "options": [
+        "Mọi ngoại lệ kể cả lỗi dữ liệu đầu vào đã dự kiến",
+        "Thông tin tiến trình bình thường",
+        "Sự cố thật sự cần con người chú ý hoặc hành động",
+        "Chi tiết gỡ lỗi tạm thời"
+      ],
+      "answerIndex": 2,
+      "explanation": "Lạm dụng mức lỗi làm mòn kênh tín hiệu. Ý nghĩa từng mức phải là thỏa ước chung của cả team vận hành."
+    },
+    {
+      "question": "Log trong vòng lặp nóng cần kỷ luật gì?",
+      "options": [
+        "Tổng hợp thành một dòng tổng kết theo lô, hoặc lấy mẫu, tránh một dòng cho mỗi phần tử",
+        "Ghi mọi phần tử để đủ chi tiết",
+        "Tắt toàn bộ log của service",
+        "Chỉ ghi khi có lỗi biên dịch"
+      ],
+      "answerIndex": 0,
+      "explanation": "Một dòng cho mỗi phần tử trong lô lớn làm ngập đĩa, tốn chi phí tập hợp và che mất tín hiệu thật trong sự cố."
+    },
+    {
+      "question": "Định danh nào nối log với trace của cùng một hành trình?",
+      "options": [
+        "Tên của developer",
+        "Số cổng của service",
+        "Định danh truy vết được đặt vào MDC và xuất hiện trong cả log lẫn span",
+        "Tên file log"
+      ],
+      "answerIndex": 2,
+      "explanation": "Cùng một định danh xuất hiện ở hai trụ cột là chiếc cầu cho phép nhảy từ log tới trace và ngược lại khi điều tra."
+    },
+    {
+      "question": "Kiểm chứng cấu hình log có cấu trúc đạt yêu cầu bằng cách nào?",
+      "options": [
+        "Đọc file cấu hình và gật đầu",
+        "Chạy một giao dịch kiểm chứng và xác nhận dòng JSON có đủ trường chuẩn, đúng định danh và không chứa dữ liệu bị cấm",
+        "Xem log có dài hay không",
+        "Đếm số appender đã khai báo"
+      ],
+      "answerIndex": 1,
+      "explanation": "Cấu hình log rất dễ sai lặng lẽ ở encoder và mẫu trường. Chỉ dòng log thật của giao dịch kiểm chứng mới là bằng chứng."
+    }
+  ]
+}

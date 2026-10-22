@@ -1,0 +1,193 @@
+---
+title: "Spring Cloud Gateway so với Kong — Chọn gateway cho Nova Loyalty"
+module: 10
+level: "Middle"
+duration: 50
+order: 2
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Spring Cloud 2023.0.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Định nghĩa được route của Spring Cloud Gateway gồm predicate và filter, và viết được cả cấu hình YAML lẫn `RouteLocator` bằng Java.
+- So sánh được Spring Cloud Gateway và Kong trên các trục kiến trúc, vận hành, hiệu năng vận hành và hệ sinh thái plugin.
+- Đề xuất được quyết định gateway cho Nova Loyalty kèm điều kiện đảo ngược quyết định, dựa trên bằng chứng thay vì sở thích cá nhân.
+
+## Vì sao cần biết
+
+Nova Loyalty hiện đặt Kong làm gateway trước các API dưới tiền tố `/v4/{gs,os,ws}/*`, phân theo nhóm game service, online service và web service. Khi hệ thống mở rộng và đội ngũ muốn đưa logic định tuyến, giới hạn tần suất hoặc kiểm tra token vào cùng vòng đời phát hành với code Java, câu hỏi "có nên chuyển sang Spring Cloud Gateway không" xuất hiện một cách tự nhiên. Đây là quyết định kiến trúc có chi phí đảo ngược cao: trả lời sai sẽ tốn nhiều tháng migrate. Bài này cho bạn đủ khái niệm để so sánh công bằng, thay vì chọn theo tiếng ồn của cộng đồng.
+
+## Nội dung chính
+
+### Ba khái niệm lõi của Spring Cloud Gateway
+
+Spring Cloud Gateway (bản reactive, chạy trên nền WebFlux) được xây quanh ba khái niệm:
+
+- Route: một định tuyến gồm id, đích đến (URI), tập predicate và tập filter.
+- Predicate: điều kiện khớp trên request như path, host, header, method hoặc khoảng thời gian.
+- Filter: thành phần can thiệp vào request/response trên đường đi, ví dụ thêm header, giới hạn tần suất, retry có kiểm soát hoặc viết lại path.
+
+Gateway chạy dạng reactive nên không được chặn luồng bằng lời gọi đồng bộ chặn trong filter tùy biến. Đây là khác biệt tư duy lớn nhất so với các gateway dạng plugin truyền thống.
+
+<Mermaid chart={`flowchart LR
+  Client[Client] --> GW[Spring Cloud Gateway]
+  GW -->|predicate Path=/v4/gs/**| GS[Game service]
+  GW -->|predicate Path=/v4/os/**| OS[Online service]
+  GW -->|predicate Path=/v4/ws/**| WS[Web service]
+  GW -.-> F[Filter chain<br/>auth / rate limit / header]`} label="Spring Cloud Gateway khớp predicate theo tiền tố /v4/gs, /v4/os, /v4/ws rồi áp dụng filter chain trước khi chuyển tiếp." />
+
+### Định tuyến bằng YAML và bằng Java
+
+Khai báo bằng YAML phù hợp khi route đơn giản và muốn thay đổi qua cấu hình. Khai báo bằng Java (`RouteLocatorBuilder`) phù hợp khi logic khớp phức tạp, cần tái sử dụng predicate tùy biến hoặc muốn kiểm thử route bằng unit test. Hai cách có thể cùng tồn tại; hãy chọn một chuẩn cho mỗi nhóm route để tránh hai nguồn sự thật.
+
+Liên hệ trực tiếp tới Nova Loyalty: ba tiền tố `/v4/gs/*`, `/v4/os/*`, `/v4/ws/*` ánh xạ rất tự nhiên thành ba predicate theo path. Nhưng tự nhiên không có nghĩa là nên migrate ngay — xem phần so sánh bên dưới.
+
+### Kong: gateway độc lập với hệ sinh thái riêng
+
+Kong là một gateway/API platform độc lập về công nghệ, chạy tách khỏi JVM của các service, cấu hình qua cơ chế khai báo riêng và có hệ sinh thái plugin phong phú cho auth, rate limiting, logging và transformation. Điểm mạnh thực tế của Kong là tính độc lập ngôn ngữ và bề dày vận hành ở tầng edge; điểm cần cân nhắc là đội ngũ phải duy trì một hệ thống cấu hình và vòng đời riêng, tách khỏi quy trình build/test của code Java.
+
+### Bảng so sánh trung lập
+
+| Trục so sánh | Spring Cloud Gateway | Kong |
+| --- | --- | --- |
+| Mô hình chạy | Thư viện/ứng dụng Spring Boot reactive trong hệ sinh thái Java | Gateway độc lập, tách khỏi runtime của service |
+| Cấu hình route | YAML/properties hoặc Java `RouteLocator` | Khai báo qua công cụ và API quản trị riêng của Kong |
+| Mở rộng logic | Viết filter bằng Java, đi cùng vòng đời test/deploy của team Java | Dùng plugin có sẵn hoặc phát triển plugin theo cơ chế của Kong |
+| Đồng bộ với team Java | Cao: cùng ngôn ngữ, cùng pipeline, cùng observability | Thấp hơn: thêm một stack vận hành riêng |
+| Tính độc lập edge | Gắn với hệ sinh thái Spring | Mạnh: phục vụ tốt kiến trúc đa ngôn ngữ, đa team |
+| Rủi ro chính | Lạm dụng filter chặn luồng trong môi trường reactive; biến gateway thành nơi chứa logic nghiệp vụ | Drift cấu hình giữa gateway và service; chi phí vận hành một platform riêng |
+
+### Vấn đề client IP và SNAT phía sau load balancer
+
+Dù chọn gateway nào, Nova Loyalty đều đang gặp bài toán mất client IP do SNAT phía sau load balancer: địa chỉ nguồn mà service nhìn thấy là địa chỉ của thiết bị mạng, không phải của client thật. Cách xử lý chuẩn là dựa vào header chuyển tiếp như `X-Forwarded-For` — nhưng chỉ tin header này khi request đi qua đúng các proxy tin cậy đã cấu hình. Đổi gateway không tự động sửa được bài toán này; đây là vấn đề của toàn bộ chuỗi proxy.
+
+### Khung ra quyết định cho Nova Loyalty
+
+Giữ Kong khi: edge cần phục vụ nhiều stack ngoài Java, plugin có sẵn đáp ứng đủ nhu cầu, và đội platform đã vận hành Kong ổn định. Cân nhắc Spring Cloud Gateway khi: toàn bộ backend là Java, nhu cầu chính là predicate/filter tùy biến theo nghiệp vụ loyalty, và team muốn route đi cùng pipeline kiểm thử của service. Trong cả hai trường hợp, logic nghiệp vụ (cộng điểm, quy đổi quà) không bao giờ thuộc về gateway.
+
+## Code
+
+Định tuyến bằng YAML cho ba nhóm tiền tố của Nova Loyalty:
+
+```yaml filename=gateway-routes.yml
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: nova-game-service
+          uri: lb://game-service
+          predicates:
+            - Path=/v4/gs/**
+          filters:
+            - StripPrefix=2
+        - id: nova-online-service
+          uri: lb://online-service
+          predicates:
+            - Path=/v4/os/**
+          filters:
+            - StripPrefix=2
+        - id: nova-web-service
+          uri: lb://web-service
+          predicates:
+            - Path=/v4/ws/**
+          filters:
+            - StripPrefix=2
+          metadata:
+            note: "Route theo tiền tố của Nova Loyalty"
+```
+
+Cùng logic bằng Java để có thể unit test và tái sử dụng predicate:
+
+```java filename=GatewayRoutes.java
+package com.nova.loyalty.gateway;
+
+import org.springframework.cloud.gateway.route.RouteLocator;
+import org.springframework.cloud.gateway.route.builder.RouteLocatorBuilder;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class GatewayRoutes {
+
+    @Bean
+    public RouteLocator novaRouteLocator(RouteLocatorBuilder builder) {
+        return builder.routes()
+                .route("nova-game-service", r -> r
+                        .path("/v4/gs/**")
+                        .filters(f -> f.stripPrefix(2))
+                        .uri("lb://game-service"))
+                .route("nova-online-service", r -> r
+                        .path("/v4/os/**")
+                        .filters(f -> f.stripPrefix(2))
+                        .uri("lb://online-service"))
+                .route("nova-web-service", r -> r
+                        .path("/v4/ws/**")
+                        .filters(f -> f.stripPrefix(2))
+                        .uri("lb://web-service"))
+                .build();
+    }
+}
+```
+
+Dependency cần thiết cho bản gateway reactive:
+
+```xml filename=pom-gateway.xml
+<dependencies>
+    <dependency>
+        <groupId>org.springframework.cloud</groupId>
+        <artifactId>spring-cloud-starter-gateway</artifactId>
+    </dependency>
+</dependencies>
+```
+
+## Sai lầm thường gặp
+
+### 1. Đưa logic nghiệp vụ vào gateway filter
+
+- **Triệu chứng:** Gateway chứa điều kiện cộng điểm, chặn đổi quà theo hạng thành viên; mỗi thay đổi nghiệp vụ phải deploy cả gateway.
+- **Nguyên nhân:** Nhầm lẫn giữa quan tâm ở tầng edge (auth, rate limit, routing) với luật nghiệp vụ thuộc về service.
+- **Fix:** Gateway chỉ làm routing, bảo vệ edge và các quan tâm cắt ngang thuần kỹ thuật; luật loyalty ở lại trong service nghiệp vụ.
+
+### 2. Viết filter chặn luồng trong gateway reactive
+
+- **Triệu chứng:** Gateway nghẽn nghiêm trọng khi tải tăng dù route và backend đều khỏe.
+- **Nguyên nhân:** Filter tùy biến thực hiện lời gọi chặn (blocking) trên luồng reactive, phá vỡ mô hình non-blocking của WebFlux.
+- **Fix:** Dùng API reactive cho mọi thao tác I/O trong filter; nếu bắt buộc gọi thành phần chặn, cô lập nó đúng cách và kiểm chứng bằng tải thử, hoặc cân nhắc bản gateway dạng servlet phù hợp hơn.
+
+### 3. Tin tuyệt đối vào header chuyển tiếp địa chỉ client
+
+- **Triệu chứng:** Log và cơ chế chống gian lận ghi nhận địa chỉ IP giả mạo do client tự gửi header.
+- **Nguyên nhân:** Tin `X-Forwarded-For` từ mọi nguồn thay vì chỉ từ các proxy tin cậy trong chuỗi đã kiểm soát.
+- **Fix:** Chỉ định rõ các proxy được tin cậy, ghi log kèm chuỗi chuyển tiếp đầy đủ khi điều tra, và nhớ rằng SNAT sau load balancer là bài toán của cả chuỗi hạ tầng chứ không riêng gateway.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Viết route:** Viết thêm một route YAML và một route Java cho tiền tố giả định `/v4/partner/**` của Nova Loyalty, kèm một filter hợp lệ ở tầng edge mà bạn tự chọn, và giải thích vì sao filter đó thuộc về gateway chứ không thuộc về service.
+2. **So sánh có bằng chứng:** Chọn 3 trục trong bảng so sánh và viết cho mỗi trục một câu hỏi cần hỏi đội platform của Nova Loyalty để có dữ kiện thật trước khi quyết định migrate hay giữ Kong.
+3. **Đọc code trả lời:** Trong `GatewayRoutes`, nếu hai route cùng khớp một path thì điều gì quyết định route nào thắng? Nêu cách bạn sẽ kiểm chứng hành vi này bằng test thay vì đoán.
+4. **Kịch bản sự cố:** Sau khi đổi gateway, toàn bộ log truy cập đều ghi cùng một địa chỉ IP của load balancer. Viết quy trình điều tra 4 bước liên quan tới SNAT và header chuyển tiếp.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Cloud Gateway — Reference Documentation: https://docs.spring.io/spring-cloud-gateway/reference/
+- Spring Cloud — Reference Documentation: https://docs.spring.io/spring-cloud/docs/current/reference/html/
+- Spring Framework — WebFlux: https://docs.spring.io/spring-framework/reference/web/webflux.html
+
+## Đọc thêm
+
+Không có.

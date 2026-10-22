@@ -1,0 +1,201 @@
+---
+title: "Resilience4j — Circuit Breaker và Bulkhead"
+module: 10
+level: "Middle"
+duration: 55
+order: 3
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Spring Cloud 2023.0.x", "Resilience4j 2.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Giải thích được ba trạng thái của circuit breaker và ý nghĩa của các ngưỡng tỷ lệ lỗi, cửa sổ trượt và thời gian chờ ở trạng thái mở.
+- Cấu hình được `@CircuitBreaker` và `@Bulkhead` bằng YAML của Resilience4j 2.x và viết được fallback method đúng chữ ký.
+- Phân tích được một kịch bản sụp đổ dây chuyền tại Nova Loyalty và chỉ ra vị trí đặt breaker/bulkhead để ngăn nó.
+
+## Vì sao cần biết
+
+Tại Nova Loyalty, service điểm (points) gọi xuống hệ thống CRM và các dịch vụ đối tác để đồng bộ số dư và đổi quà. Khi CRM chậm lại thay vì chết hẳn, kịch bản nguy hiểm nhất xảy ra: mọi thread của points bị treo chờ timeout, request mới tiếp tục đổ vào, và cuối cùng points sụp theo dù bản thân nó không hề có lỗi. Đây là cascading failure kinh điển trong hệ phân tán. Circuit breaker cắt mạch gọi khi đối tác đang lỗi để giải phóng tài nguyên và cho đối tác thời gian hồi phục; bulkhead giới hạn số lời gọi đồng thời vào từng đối tác để một đối tác chậm không nuốt hết sức chứa của cả service. Thiếu hai cơ chế này, một sự cố của đối tác sẽ thành sự cố toàn hệ thống.
+
+## Nội dung chính
+
+### Circuit breaker: máy trạng thái ba trạng thái
+
+Circuit breaker bao quanh một lời gọi ra ngoài và vận hành như cầu dao điện:
+
+- Đóng (closed): lời gọi đi bình thường, breaker ghi lại kết quả thành công/thất bại vào cửa sổ trượt.
+- Mở (open): khi tỷ lệ lỗi vượt ngưỡng trong cửa sổ, breaker mở — mọi lời gọi bị từ chối ngay lập tức bằng exception chuyên dụng mà không chạm tới đối tác, cho đối tác thời gian hồi phục.
+- Nửa mở (half-open): sau thời gian chờ, breaker cho một số ít lời gọi thử đi qua; nếu thành công đủ, breaker đóng lại; nếu vẫn lỗi, breaker mở tiếp.
+
+<Mermaid chart={`stateDiagram-v2
+  [*] --> Closed
+  Closed --> Open: tỷ lệ lỗi vượt ngưỡng
+  Open --> HalfOpen: hết thời gian chờ
+  HalfOpen --> Closed: lời gọi thử thành công
+  HalfOpen --> Open: lời gọi thử vẫn lỗi`} label="Máy trạng thái circuit breaker: Closed, Open và HalfOpen với các điều kiện chuyển trạng thái." />
+
+### Các tham số cấu hình quan trọng
+
+Với Resilience4j 2.x, các tham số cần hiểu rõ thay vì copy mặc định:
+
+- `failureRateThreshold`: tỷ lệ phần trăm lỗi khiến breaker mở.
+- `slowCallRateThreshold` và `slowCallDurationThreshold`: coi lời gọi chậm như một dạng lỗi — cực kỳ quan trọng vì đối tác chậm nguy hiểm hơn đối tác chết hẳn.
+- `minimumNumberOfCalls`: số lời gọi tối thiểu trong cửa sổ trước khi breaker được phép mở, tránh mở oan khi lưu lượng quá thấp.
+- `waitDurationInOpenState`: thời gian chờ ở trạng thái mở trước khi cho gọi thử.
+- `permittedNumberOfCallsInHalfOpenState`: số lời gọi thử được phép.
+
+Đừng sao chép ngưỡng từ blog: ngưỡng đúng phải suy ra từ SLO của đối tác và đặc tính lưu lượng của chính Nova Loyalty.
+
+### Bulkhead: chia khoang cho từng đối tác
+
+Bulkhead mượn hình ảnh vách ngăn tàu thủy: nếu một khoang ngập nước, các khoang còn lại vẫn khô. Có hai biến thể trong Resilience4j: semaphore bulkhead giới hạn số lời gọi đồng thời, và thread-pool bulkhead dùng hàng đợi và pool riêng. Với đa số service Spring Boot hiện nay, semaphore bulkhead là lựa chọn mặc định đơn giản và hiệu quả để giới hạn mức đồng thời vào từng dependency, ví dụ CRM có giới hạn riêng, đối tác quà tặng có giới hạn riêng.
+
+Khác với breaker (phản ứng theo tỷ lệ lỗi), bulkhead phản ứng theo mức chiếm dụng: kể cả khi đối tác chưa lỗi, bulkhead vẫn chặn việc một dependency nuốt toàn bộ sức chứa.
+
+### Fallback: suy giảm có kiểm soát
+
+Fallback method chạy khi lời gọi bị breaker mở, bị bulkhead từ chối hoặc ném exception thuộc diện được ghi nhận. Fallback phải nhanh, không gọi tiếp xuống dependency đang lỗi, và trả về hành vi suy giảm đã được nghiệp vụ chấp nhận: ví dụ hiển thị số dư đã cache kèm nhãn thời gian, hoặc xếp yêu cầu đổi quà vào hàng đợi xử lý sau. Fallback lặng lẽ trả dữ liệu sai mà không đánh dấu là hành vi nguy hiểm cần tránh.
+
+Chữ ký fallback phải khớp với method gốc cộng thêm tham số exception ở cuối; nếu khớp sai, bạn chỉ phát hiện lúc runtime đúng thời điểm hệ thống đang sự cố — vì vậy hãy có test cho đường fallback.
+
+### Ghi nhận exception: lỗi nào tính, lỗi nào không
+
+Không phải exception nào cũng nên tính vào tỷ lệ lỗi của breaker. Lỗi do client gửi dữ liệu sai (ví dụ validation) không phản ánh sức khỏe đối tác và phải được đưa vào danh sách bỏ qua. Ngược lại, timeout, lỗi kết nối và lỗi 5xx của đối tác là tín hiệu sức khỏe thật. Cấu hình danh sách ghi nhận/bỏ qua là phần việc thiết kế, không phải chi tiết phụ.
+
+## Code
+
+Cấu hình YAML cho breaker và bulkhead bảo vệ lời gọi CRM:
+
+```yaml filename=application-resilience.yml
+resilience4j:
+  circuitbreaker:
+    instances:
+      crmClient:
+        register-health-indicator: true
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 20
+        minimum-number-of-calls: 10
+        failure-rate-threshold: 50
+        slow-call-duration-threshold: 2s
+        slow-call-rate-threshold: 80
+        wait-duration-in-open-state: 20s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+  bulkhead:
+    instances:
+      crmClient:
+        max-concurrent-calls: 12
+        max-wait-duration: 0ms
+```
+
+Service dùng cả hai annotation trên cùng một method; fallback nhận exception ở tham số cuối:
+
+```java filename=CrmSyncService.java
+package com.nova.loyalty.points;
+
+import io.github.resilience4j.bulkhead.annotation.Bulkhead;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import java.util.Optional;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+
+@Service
+public class CrmSyncService {
+
+    private static final Logger log = LoggerFactory.getLogger(CrmSyncService.class);
+
+    private final CrmClient crmClient;
+    private final PointsBalanceCache balanceCache;
+
+    public CrmSyncService(CrmClient crmClient, PointsBalanceCache balanceCache) {
+        this.crmClient = crmClient;
+        this.balanceCache = balanceCache;
+    }
+
+    @CircuitBreaker(name = "crmClient", fallbackMethod = "balanceFallback")
+    @Bulkhead(name = "crmClient", type = Bulkhead.Type.SEMAPHORE, fallbackMethod = "balanceFallback")
+    public PointsBalance fetchBalance(Long memberId) {
+        return crmClient.getBalance(memberId);
+    }
+
+    public PointsBalance balanceFallback(Long memberId, Throwable ex) {
+        log.warn("CRM balance fallback for member {} due to {}", memberId, ex.toString());
+        Optional<PointsBalance> cached = balanceCache.find(memberId);
+        return cached
+                .map(b -> new PointsBalance(b.memberId(), b.balance(), true))
+                .orElseThrow(() -> new CrmUnavailableException("CRM unavailable and no cached balance", ex));
+    }
+}
+```
+
+Dependency cần thiết trong `pom.xml`:
+
+```xml filename=pom-resilience4j.xml
+<dependencies>
+    <dependency>
+        <groupId>org.springframework.cloud</groupId>
+        <artifactId>spring-cloud-starter-circuitbreaker-resilience4j</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-aop</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+</dependencies>
+```
+
+## Sai lầm thường gặp
+
+### 1. Chỉ đếm lỗi cứng, bỏ qua lời gọi chậm
+
+- **Triệu chứng:** Breaker không bao giờ mở dù đối tác phản hồi chậm tới mức mọi thread đều bị chiếm giữ và service sụp dây chuyền.
+- **Nguyên nhân:** Chỉ cấu hình ngưỡng tỷ lệ lỗi mà không bật ngưỡng lời gọi chậm, trong khi timeout dài khiến lỗi cứng hiếm khi xuất hiện.
+- **Fix:** Cấu hình `slowCallDurationThreshold` và `slowCallRateThreshold` sát với SLO của đối tác, đồng thời đặt timeout ở client thấp hơn ngưỡng chậm một cách có chủ đích.
+
+### 2. Fallback method sai chữ ký chỉ lộ ra lúc sự cố
+
+- **Triệu chứng:** Khi breaker mở lần đầu ở production, ứng dụng ném lỗi về việc không tìm thấy fallback thay vì thực thi fallback.
+- **Nguyên nhân:** Chữ ký fallback không khớp method gốc cộng tham số exception; annotation xử lý bằng proxy nên lỗi không xuất hiện lúc biên dịch.
+- **Fix:** Viết test ép breaker mở và gọi qua đường fallback; kiểm tra log khởi động và tài liệu của Resilience4j về quy tắc chữ ký fallback.
+
+### 3. Một bulkhead dùng chung cho mọi dependency
+
+- **Triệu chứng:** Đối tác quà tặng chậm làm cạn giới hạn đồng thời, kéo theo cả lời gọi CRM cũng bị từ chối dù CRM hoàn toàn khỏe.
+- **Nguyên nhân:** Dùng chung một instance bulkhead cho nhiều dependency khác nhau, phá vỡ nguyên tắc chia khoang.
+- **Fix:** Mỗi dependency một instance bulkhead riêng với giới hạn suy ra từ sức chứa thật của dependency đó.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Đọc cấu hình trả lời:** Với cấu hình YAML ở mục Code, breaker cần tối thiểu bao nhiêu lời gọi mới được mở? Khi ở trạng thái mở, request bị xử lý thế nào và sau bao lâu breaker mới cho gọi thử?
+2. **Thiết kế ngưỡng:** CRM của Nova Loyalty có SLO phản hồi dưới 2 giây cho 95 phần trăm request. Đề xuất bộ tham số breaker (ngưỡng lỗi, ngưỡng chậm, cửa sổ, thời gian chờ) kèm lý do cho từng con số, và nêu dữ kiện nào bạn cần đo thêm trước khi chốt.
+3. **Viết fallback:** Viết (bằng tay, dạng mã giả chi tiết hoặc Java) fallback cho thao tác đổi quà khi đối tác quà tặng sập: hành vi suy giảm nào chấp nhận được về nghiệp vụ, dữ liệu nào phải được ghi lại để xử lý bù sau?
+4. **Kịch bản dây chuyền:** Vẽ timeline sụp đổ dây chuyền khi CRM chậm dần từ 200ms lên 8 giây mà không có breaker/bulkhead, rồi vẽ lại timeline khi có cả hai cơ chế và giải thích điểm khác biệt quyết định.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Resilience4j — Documentation, CircuitBreaker: https://resilience4j.readme.io/docs/circuitbreaker
+- Resilience4j — Documentation, Bulkhead: https://resilience4j.readme.io/docs/bulkhead
+- Spring Cloud Circuit Breaker — Reference Documentation: https://docs.spring.io/spring-cloud-circuitbreaker/reference/
+
+## Đọc thêm
+
+Không có.

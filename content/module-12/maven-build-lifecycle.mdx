@@ -1,0 +1,201 @@
+---
+title: "Maven build lifecycle — Pha, plugin và multi-module"
+module: 12
+level: "Junior"
+duration: 40
+order: 1
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Kể được thứ tự các pha chính của vòng đời build mặc định của Maven và giải thích được vì sao chạy một pha sẽ kéo theo mọi pha trước nó.
+- Phân biệt được vai trò của `pom.xml` ở tầng parent, module con và dependency management trong một dự án multi-module.
+- Dự đoán được artifact sinh ra ở từng bước build của một service Spring Boot và đọc được lỗi build phổ biến từ log của Maven.
+
+## Vì sao cần biết
+
+Mọi service của Nova Loyalty đều build bằng Maven trên Java 21 và Spring Boot 3.3.x, và pipeline CI/CD của team (các bài tiếp theo trong module này) đứng hoàn toàn trên vòng đời build của Maven: test ở một pha, đóng gói ở pha khác, kiểm chứng ở pha riêng. Khi pipeline báo đỏ, người không hiểu lifecycle sẽ mò mẫm chạy lại từng lệnh vô định; người hiểu lifecycle đọc log là biết ngay pha nào gãy, plugin nào chịu trách nhiệm và lệnh chạy local nào tái hiện được đúng lỗi đó. Đây cũng là nền tảng để hiểu vì sao Flyway migration được gắn ở một bước riêng trong pipeline thay vì chạy tùy tiện.
+
+## Nội dung chính
+
+### Vòng đời và pha: chạy một pha là chạy cả chuỗi trước nó
+
+Maven tổ chức việc build thành các vòng đời (lifecycle), trong đó vòng đời mặc định lo việc biên dịch, kiểm thử và đóng gói. Bên trong vòng đời, các pha (phase) chạy theo thứ tự cố định. Khi bạn yêu cầu Maven thực thi một pha, nó sẽ chạy lần lượt mọi pha từ đầu vòng đời tới pha đó rồi mới dừng. Các pha chính cần thuộc theo thứ tự:
+
+- `validate`: kiểm tra cấu trúc dự án và các thông tin cần thiết có mặt hay chưa.
+- `compile`: biên dịch mã nguồn chính.
+- `test`: chạy unit test bằng framework kiểm thử đã cấu hình.
+- `package`: đóng gói thành artifact phân phối được, với ứng dụng Spring Boot là file jar có thể chạy.
+- `verify`: chạy các kiểm tra trên kết quả của gói đóng gói, ví dụ integration test và các cổng chất lượng.
+- `install`: cài artifact vào kho lưu trữ local để các dự án khác trên cùng máy dùng được.
+- `deploy`: đưa artifact lên kho lưu trữ từ xa để chia sẻ với team và hệ thống khác.
+
+Hệ quả thực tế quan trọng nhất: lệnh chạy tới pha `verify` đã bao gồm cả `test`; việc một pipeline "chạy test hai lần" thường chỉ là hai lệnh Maven chồng chéo pha lên nhau.
+
+<Mermaid chart={`flowchart LR
+  V[validate] --> C[compile] --> T[test]
+  T --> P[package] --> Vf[verify]
+  Vf --> I[install] --> D[deploy]`} label="Thứ tự các pha chính của vòng đời mặc định của Maven: yêu cầu một pha sẽ thực thi mọi pha đứng trước nó." />
+
+### Plugin và goal: pha là khung, plugin mới làm việc thật
+
+Bản thân các pha chỉ là cột mốc; công việc thật do các plugin thực hiện qua các goal được gắn vào pha. Maven có sẵn các gắn kết mặc định cho dự án dạng jar: plugin biên dịch gắn vào pha `compile`, plugin kiểm thử gắn vào pha `test`, plugin đóng gói gắn vào pha `package`. Plugin đóng gói của Spring Boot gắn thêm bước tái đóng gói để biến jar thường thành jar chạy được kèm các dependency.
+
+Khi cần hành vi ngoài mặc định — ví dụ kiểm tra định dạng mã nguồn ở pha `validate` hay sinh báo cáo ở pha `verify` — bạn khai báo plugin và gắn goal của nó vào đúng pha mong muốn trong `pom.xml`. Đặt sai pha là nguồn lỗi kinh điển: kiểm tra đặt ở pha quá muộn khiến pipeline tốn thời gian mới phát hiện lỗi rẻ tiền.
+
+### Multi-module và parent POM
+
+Dự án lớn thường chia thành nhiều module: một module chứa mã dùng chung, các module service chứa ứng dụng. Một `pom.xml` ở tầng cao nhất đóng vai trò parent và aggregator: nó liệt kê các module con, đồng thời quản lý tập trung phiên bản qua khối quản lý dependency và quản lý plugin. Module con chỉ khai báo parent và dùng các dependency không kèm phiên bản — phiên bản được quyết một chỗ duy nhất.
+
+Với Nova Loyalty, mô hình này cho phép khóa đồng loạt Java 21 và Spring Boot 3.3.x cho mọi service ở một nơi, tránh cảnh service này vô tình trôi sang phiên bản khác. Reactor của Maven tự suy ra thứ tự build đúng giữa các module dựa trên quan hệ phụ thuộc: module dùng chung luôn được build trước các service dùng nó.
+
+### Kho lưu trữ local và tính tái lập của build
+
+Maven tải dependency về kho lưu trữ local trên máy build và tái sử dụng cho các lần sau. Hệ quả hai mặt: build nhanh hơn, nhưng một kho local bị nhiễm artifact lạ có thể khiến build local đạt trong khi CI sạch lại gãy — hoặc ngược lại. Nguyên tắc kỷ luật: lỗi build chỉ được kết luận khi đã tái hiện trên một môi trường sạch hoặc đã loại trừ yếu tố kho local. Đây là lý do CI luôn là trọng tài cuối cùng cho câu hỏi "build có đạt hay không".
+
+## Code
+
+Một parent `pom.xml` rút gọn cho cấu trúc multi-module của Nova Loyalty:
+
+```xml filename=pom-parent.xml
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.3.5</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.nova</groupId>
+    <artifactId>nova-loyalty-parent</artifactId>
+    <version>1.4.2</version>
+    <packaging>pom</packaging>
+
+    <modules>
+        <module>nova-common</module>
+        <module>nova-points</module>
+        <module>nova-gift</module>
+    </modules>
+
+    <properties>
+        <java.version>21</java.version>
+    </properties>
+</project>
+```
+
+Module con chỉ cần khai báo parent và dependency không kèm phiên bản:
+
+```xml filename=pom-points.xml
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.nova</groupId>
+        <artifactId>nova-loyalty-parent</artifactId>
+        <version>1.4.2</version>
+    </parent>
+
+    <artifactId>nova-points</artifactId>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.nova</groupId>
+            <artifactId>nova-common</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+Các lệnh build tiêu biểu và ý nghĩa pha của chúng:
+
+```bash filename=maven-commands.sh
+# Chỉ biên dịch và chạy unit test (dừng ở pha test)
+mvn test
+
+# Đóng gói jar chạy được, đã gồm các pha trước nó
+mvn package
+
+# Chạy full kiểm chứng tới pha verify, bỏ qua install lên kho local
+mvn verify
+
+# Dọn sạch thư mục build trước khi đóng gói, dùng khi nghi ngờ artifact cũ
+mvn clean verify
+```
+
+## Sai lầm thường gặp
+
+### 1. Chạy test hai lần vì không hiểu chồng pha
+
+- **Triệu chứng:** Pipeline có hai bước test chạy nối tiếp nhau, tổng thời gian CI tăng gần gấp đôi mà không ai giải thích được vì sao.
+- **Nguyên nhân:** Một bước chạy pha `test`, bước sau chạy pha `verify` — bước sau tự chạy lại toàn bộ các pha trước nó kể cả `test`, vì vòng đời của Maven luôn chạy từ đầu tới pha được yêu cầu.
+- **Fix:** Thiết kế các bước CI theo nguyên tắc một lần chạy tới pha cao nhất cần thiết, hoặc tái sử dụng artifact đã kiểm chứng thay vì chạy lại chuỗi pha.
+
+### 2. Khai báo phiên bản dependency rải rác ở từng module con
+
+- **Triệu chứng:** Các service của Nova Loyalty lặng lẽ dùng các phiên bản thư viện khác nhau; một lỗ hổng bảo mật phải vá ở nhiều nơi và vẫn sót.
+- **Nguyên nhân:** Mỗi module con tự ghi phiên bản cho cùng một dependency thay vì để parent quản lý tập trung qua cơ chế quản lý dependency và plugin.
+- **Fix:** Mọi phiên bản chỉ được khai báo ở parent `pom.xml`; module con dùng dependency không kèm phiên bản và mọi lệch chuẩn phải qua review ở parent.
+
+### 3. Kết luận lỗi build từ một máy có kho local bị nhiễm
+
+- **Triệu chứng:** Build đạt trên máy của một developer nhưng gãy trên CI, hoặc ngược lại, và team mất hàng giờ tranh cãi "máy ai đúng".
+- **Nguyên nhân:** Kho lưu trữ local chứa artifact cũ hoặc artifact tự cài thủ công không tồn tại trên môi trường sạch, làm kết quả build phụ thuộc vào lịch sử của từng máy.
+- **Fix:** Tái hiện lỗi trên môi trường sạch hoặc với kho local mới trước khi kết luận; coi kết quả của CI là trọng tài cuối cùng.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Sắp xếp pha:** Viết lại từ trí nhớ thứ tự 7 pha chính của vòng đời mặc định, rồi trả lời: lệnh chạy tới pha `package` đã thực thi những pha nào trước đó?
+2. **Đọc POM trả lời:** Trong hai file POM ở mục Code, phiên bản của Java và của Spring Boot được quyết ở đâu? Nếu cần nâng toàn bộ Nova Loyalty lên một bản vá mới của Boot 3.3, bạn sửa mấy chỗ?
+3. **Thiết kế gắn kết plugin:** Bạn muốn một bước kiểm tra định dạng mã nguồn chạy càng sớm càng tốt và một báo cáo bao phủ kiểm thử sinh ra sau khi test chạy xong. Mỗi việc gắn vào pha nào và vì sao?
+4. **Điều tra sự cố:** Một đồng nghiệp báo "build gãy ở máy tôi nhưng CI xanh". Viết 4 bước kiểm chứng theo thứ tự, trong đó có một bước loại trừ yếu tố kho local.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Apache Maven — Introduction to the Build Lifecycle: https://maven.apache.org/guides/introduction/introduction-to-the-lifecycle.html
+- Apache Maven — POM Reference: https://maven.apache.org/pom.html
+- Spring Boot — Maven Plugin Documentation: https://docs.spring.io/spring-boot/maven-plugin/index.html
+
+## Đọc thêm
+
+Không có.

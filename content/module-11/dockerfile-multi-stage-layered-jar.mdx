@@ -1,0 +1,182 @@
+---
+title: "Dockerfile multi-stage và layered jar cho Spring Boot"
+module: 11
+level: "Junior"
+duration: 45
+order: 1
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Giải thích được vì sao Dockerfile multi-stage giúp image runtime nhỏ và an toàn hơn so với image chứa cả bộ công cụ build.
+- Viết được Dockerfile multi-stage dùng layered jar của Spring Boot, tách các lớp dependency ít thay đổi khỏi lớp chứa code ứng dụng.
+- Đọc được cấu trúc layer của một image Spring Boot và dự đoán được layer nào bị build lại khi chỉ thay đổi code nghiệp vụ.
+
+## Vì sao cần biết
+
+Mọi service của Nova Loyalty — points, gift, report — đều được đóng gói thành container image để chạy trên Kubernetes. Ở giai đoạn đầu, team dùng một Dockerfile đơn giản copy toàn bộ file jar đã build sẵn; hệ quả là mỗi lần sửa một dòng code, pipeline lại đẩy lên registry gần như toàn bộ image, và không ai dám chắc trong image có lẫn công cụ build hay dữ liệu nhạy cảm hay không. Hiểu multi-stage build và layered jar là kỹ năng nền tảng để image của Nova Loyalty nhỏ, pull nhanh, và an toàn — đồng thời là tiền đề cho các bài probes, HPA và graceful shutdown tiếp theo trong module này.
+
+## Nội dung chính
+
+### Vấn đề của image một giai đoạn
+
+Dockerfile một giai đoạn thường cài cả JDK đầy đủ, Maven và mã nguồn vào cùng image với artifact chạy thật. Ba hệ quả: image phình to vì chứa công cụ không cần lúc runtime; bề mặt tấn công rộng vì mọi công cụ build đều ở lại trong production; và ranh giới giữa "môi trường build" với "môi trường chạy" bị xóa nhòa, khiến sự cố khó truy vết.
+
+Multi-stage build tách quá trình thành nhiều stage có tên trong cùng một Dockerfile. Stage cuối cùng chỉ copy những gì thật sự cần để chạy: một JRE tối thiểu và artifact của ứng dụng.
+
+### Layered jar của Spring Boot
+
+Spring Boot đóng gói ứng dụng thành một file jar có cấu trúc lớp (layer) được thiết kế cho Docker:
+
+- Lớp dependencies: các thư viện bên thứ ba, hiếm khi thay đổi.
+- Lớp loader: thành phần khởi động của Spring Boot.
+- Lớp snapshot dependencies: các dependency dạng snapshot nếu có.
+- Lớp application: class và tài nguyên của chính ứng dụng, thay đổi trong hầu hết các lần build.
+
+Docker cache theo layer: khi chỉ code ứng dụng thay đổi, chỉ lớp application bị tạo lại và đẩy lên registry. Các lớp dependency nặng được giữ nguyên trong cache, giúp build và pull nhanh hơn rõ rệt mà không cần con số đo đạc cụ thể để tin — đây là hệ quả trực tiếp của cơ chế cache theo nội dung layer.
+
+<Mermaid chart={`flowchart TB
+  subgraph BuildStage[Stage build]
+    Src[Mã nguồn + pom.xml] --> Mvn[Maven package]
+    Mvn --> Jar[app.jar dạng layered]
+    Jar --> Extract[layertools extract]
+  end
+  Extract --> Deps[Layer dependencies]
+  Extract --> App[Layer application]
+  subgraph RuntimeStage[Stage runtime - JRE tối thiểu]
+    Deps --> Final[Image cuối]
+    App --> Final
+  end`} label="Multi-stage build: stage build trích xuất các layer từ layered jar, stage runtime chỉ chứa JRE và các layer đã trích xuất." />
+
+### Layertools: trích xuất thay vì copy nguyên jar
+
+Spring Boot cung cấp chế độ layertools để trích xuất file jar thành các thư mục layer ngay trong Dockerfile. Thay vì `COPY` nguyên file jar vào image cuối (khiến mọi thay đổi đều vô hiệu cache của toàn bộ artifact), Dockerfile copy từng thư mục layer theo thứ tự từ ít thay đổi tới hay thay đổi nhất. Thứ tự copy rất quan trọng: layer hay thay đổi phải được copy sau cùng.
+
+### Chọn base image và người dùng chạy ứng dụng
+
+Stage runtime nên dùng image JRE 21 tối thiểu từ nhà cung cấp đáng tin cậy, được cập nhật bản vá thường xuyên. Ứng dụng không cần và không nên chạy bằng người dùng root trong container: tạo một người dùng chuyên dụng không có đặc quyền và chuyển sang người dùng đó trước điểm khởi chạy. Nguyên tắc này giảm thiểu thiệt hại nếu ứng dụng bị khai thác.
+
+### Thư mục làm việc và quyền ghi trong container
+
+Một chi tiết nhỏ nhưng hay gây lỗi khó hiểu là thư mục làm việc và quyền ghi của ứng dụng trong image.
+Spring Boot có thể cần ghi file tạm, file log hoặc dữ liệu đệm xuống đĩa ở một số thư viện.
+Nếu thư mục làm việc thuộc về người dùng root và ứng dụng chạy bằng người dùng không đặc quyền,
+các thao tác ghi này sẽ thất bại chỉ khi lên production dù ở máy dev mọi thứ vẫn bình thường.
+Nguyên tắc xử lý: khai báo thư mục làm việc rõ ràng trong Dockerfile, tạo sẵn các thư mục ứng dụng cần ghi
+và gán quyền sở hữu cho đúng người dùng chạy ứng dụng ngay trong stage runtime.
+Đừng xử lý bằng cách nới quyền cho mọi người dùng — đó là cách vá làm xói mòn toàn bộ lợi ích bảo mật vừa đạt được.
+
+### Entrypoint và cách truyền tham số JVM
+
+Điểm khởi chạy nên gọi trực tiếp tiến trình Java ở dạng exec để Java trở thành tiến trình chính của container và nhận được tín hiệu như SIGTERM một cách trực tiếp — điều kiện tiên quyết cho graceful shutdown ở bài cuối module. Các tham số JVM dành cho container sẽ được bàn chi tiết ở bài tiếp theo; ở bài này chỉ cần nhớ: đừng bọc Java trong một lớp shell script trung gian nuốt tín hiệu.
+
+## Code
+
+Dockerfile multi-stage hoàn chỉnh, dùng layertools của Spring Boot 3.3.x trên Java 21:
+
+```dockerfile filename=Dockerfile
+# ---------- Stage 1: build ----------
+FROM eclipse-temurin:21-jdk AS builder
+WORKDIR /workspace
+
+COPY pom.xml .
+COPY src ./src
+
+RUN mvn -B -DskipTests package
+
+# Trích xuất các layer từ layered jar
+WORKDIR /workspace/extracted
+RUN java -Djarmode=layertools -jar /workspace/target/*.jar extract
+
+# ---------- Stage 2: runtime ----------
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+
+RUN groupadd --system nova && useradd --system --gid nova nova
+
+COPY --from=builder /workspace/extracted/dependencies/ ./
+COPY --from=builder /workspace/extracted/spring-boot-loader/ ./
+COPY --from=builder /workspace/extracted/snapshot-dependencies/ ./
+COPY --from=builder /workspace/extracted/application/ ./
+
+USER nova
+EXPOSE 8080
+ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]
+```
+
+Kiểm tra các layer có trong file jar đã build bằng chính layertools ở máy local:
+
+```bash filename=inspect-layers.sh
+# Liệt kê các layer mà layertools nhận diện trong file jar
+java -Djarmode=layertools -jar target/nova-points-1.0.0.jar list
+
+# Trích xuất thủ công để kiểm chứng cấu trúc thư mục trước khi viết Dockerfile
+java -Djarmode=layertools -jar target/nova-points-1.0.0.jar extract --destination /tmp/layers
+ls /tmp/layers
+```
+
+Đảm bảo build của Maven tạo jar đúng định dạng Spring Boot đóng gói (plugin đóng gói chuẩn của Spring Boot):
+
+```xml filename=pom-boot-plugin.xml
+<build>
+    <plugins>
+        <plugin>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-maven-plugin</artifactId>
+        </plugin>
+    </plugins>
+</build>
+```
+
+## Sai lầm thường gặp
+
+### 1. Copy nguyên file jar thay vì tách layer
+
+- **Triệu chứng:** Mỗi lần sửa một dòng code, pipeline đẩy lại gần như toàn bộ kích thước image lên registry và thời gian pull ở node mới rất lâu.
+- **Nguyên nhân:** Toàn bộ artifact nằm trong một layer duy nhất nên thay đổi nhỏ nhất cũng làm mất cache của cả layer chứa mọi dependency.
+- **Fix:** Dùng layertools để trích xuất và copy riêng từng layer theo thứ tự ít thay đổi trước, hay thay đổi sau.
+
+### 2. Chạy ứng dụng bằng người dùng root trong container
+
+- **Triệu chứng:** Kiểm tra bảo mật báo container chạy với UID 0; một lỗ hổng trong ứng dụng có thể leo thang thành kiểm soát container ở mức cao nhất.
+- **Nguyên nhân:** Dockerfile không tạo người dùng chuyên dụng và không có chỉ thị chuyển người dùng trước entrypoint.
+- **Fix:** Tạo group/user hệ thống không đặc quyền ở stage runtime, gán quyền sở hữu cần thiết cho thư mục ứng dụng, và đặt chỉ thị người dùng trước `ENTRYPOINT`.
+
+### 3. Bọc Java qua shell script làm mất tín hiệu SIGTERM
+
+- **Triệu chứng:** Khi pod bị xóa, ứng dụng không hề nhận được giai đoạn graceful shutdown mà bị giết cứng sau thời gian chờ.
+- **Nguyên nhân:** Entrypoint dạng shell khiến shell thành tiến trình chính; tín hiệu của Kubernetes gửi tới shell chứ không tới tiến trình Java.
+- **Fix:** Dùng entrypoint dạng exec (mảng JSON) gọi thẳng Java, để Java là tiến trình chính và nhận trực tiếp SIGTERM — nền tảng cho bài preStop và graceful shutdown.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Đọc Dockerfile trả lời:** Trong Dockerfile ở mục Code, nếu chỉ sửa một class nghiệp vụ rồi build lại, những layer nào của image cuối thay đổi và những layer nào được dùng lại từ cache? Giải thích dựa trên thứ tự copy.
+2. **Viết tay biến thể:** Viết lại stage runtime cho trường hợp team muốn tự copy file jar nguyên khối (không dùng layertools) và nêu rõ đánh đổi về cache và tốc độ pull so với bản tách layer.
+3. **Kiểm chứng bằng tay:** Liệt kê các lệnh bạn sẽ chạy để chứng minh image cuối không chứa Maven, không chứa mã nguồn và không chạy bằng root — mỗi kiểm chứng một lệnh cụ thể.
+4. **Thiết kế:** Nova Loyalty có 3 service dùng chung rất nhiều dependency. Đề xuất cách tổ chức build để tận dụng cache dùng chung ở tầng CI mà vẫn giữ mỗi service một image riêng.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Docker — Multi-stage builds: https://docs.docker.com/build/building/multi-stage/
+- Spring Boot — Dockerfiles and layered jars: https://docs.spring.io/spring-boot/reference/packaging/container-images/dockerfiles.html
+- Docker — Dockerfile reference: https://docs.docker.com/reference/dockerfile/
+
+## Đọc thêm
+
+Không có.

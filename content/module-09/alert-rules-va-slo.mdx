@@ -1,0 +1,180 @@
+---
+title: "Alert Rules, SLI, SLO và Runbook"
+module: 9
+level: "Senior"
+duration: 55
+order: 5
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Micrometer 1.13.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Định nghĩa được SLI và SLO cho 3 dịch vụ trọng điểm của Nova Loyalty, kèm cửa sổ đo và ngân sách lỗi suy ra từ SLO.
+- Viết được alert rules Prometheus cho cạn pool Hikari, consumer lag cao và tỉ lệ lỗi tăng, mỗi rule có thời gian chờ cháy và nhãn mức độ.
+- Soạn được runbook tối thiểu cho từng cảnh báo: triệu chứng, bước khoanh vùng bằng dashboard và trace, hành động xử lý và tiêu chí đóng.
+
+## Vì sao cần biết
+
+Observability chỉ có giá trị khi nó đánh thức đúng người vào đúng lúc với đủ ngữ cảnh để hành động. Tại Nova Loyalty, ba cơn ác mộng vận hành là pool của một datasource cạn khiến request xếp hàng, consumer CRM lag tăng làm dữ liệu điểm lệch lâu giữa hai hệ thống, và tỉ lệ lỗi qua gateway tăng vọt sau một đợt phát hành. Bài này biến metrics của các bài trước thành alert rules có kỷ luật, đặt chúng trên nền SLI và SLO được nghiệp vụ đồng thuận, và gắn mỗi cảnh báo với một runbook — vì một cảnh báo không có hành động tiếp theo chỉ là tiếng ồn đắt tiền.
+
+## Nội dung chính
+
+### SLI và SLO: đo điều người dùng cảm nhận
+
+Chỉ số mức dịch vụ là một tỉ lệ đo bằng số đo thật, ví dụ tỉ lệ request thành công trên tổng request qua gateway.
+Mục tiêu mức dịch vụ là ngưỡng cam kết cho chỉ số đó trong một cửa sổ thời gian trượt.
+Ngân sách lỗi là phần được phép hỏng suy ra từ mục tiêu: ngân sách còn nhiều thì team được phép mạo hiểm phát hành nhanh.
+Cảnh báo tốt nhất cháy theo tốc độ tiêu thụ ngân sách lỗi, không cháy theo từng lỗi đơn lẻ.
+Mọi ngưỡng đều là thỏa thuận với nghiệp vụ và phải được tự đo trên hệ thống thật, không sao chép từ hệ thống khác.
+
+### Alert rules có kỷ luật
+
+Mỗi rule cần biểu thức rõ ràng, khoảng thời gian chờ để loại bỏ nhiễu thoáng qua và nhãn mức độ.
+Rule cạn pool nhìn vào thread chờ connection và tỉ lệ connection đang hoạt động theo từng pool.
+Rule lag nhìn vào độ trễ tiêu thụ của nhóm CRM và tốc độ tăng của nó, có ngoại lệ cho cửa sổ draining sau triển khai.
+Rule tỉ lệ lỗi nhìn vào tỉ lệ trên cửa sổ đủ dài với điều kiện mẫu số tối thiểu.
+Tên rule và tóm tắt phải nói rõ triệu chứng và phạm vi bị ảnh hưởng ngay trong thông báo đầu tiên.
+
+<Mermaid chart={`flowchart LR
+  M[Metrics Prometheus] --> R[Alert rules danh gia]
+  R -->|chay du lau| AM[Alertmanager]
+  AM --> On[Ca truc nhan canh bao]
+  On --> RB[Runbook: khoanh vung, xu ly, dong]
+  RB --> SLO[Doi chieu ngan sach loi SLO]`} label="Từ metrics tới hành động: alert, runbook và ngân sách lỗi" />
+
+### Runbook: phần con người của cảnh báo
+
+Runbook bắt đầu bằng triệu chứng và cách xác nhận cảnh báo là thật.
+Phần khoanh vùng trỏ thẳng tới dashboard, truy vấn và trace mẫu cần mở, theo đúng thứ tự của Module 09.
+Phần xử lý liệt kê hành động an toàn theo thứ tự ưu tiên và điểm dừng phải escalate.
+Phần đóng sự cố ghi tiêu chí hồi phục và việc hậu kiểm bắt buộc.
+Một cảnh báo không có runbook đi kèm chưa được coi là hoàn thành khi review.
+
+Một hệ thống cảnh báo trưởng thành còn cần vòng đời quản trị rõ ràng cho từng rule.
+Mỗi rule có người sở hữu, ngày review gần nhất và lý do tồn tại được ghi lại.
+Rule không cháy lần nào trong thời gian dài phải được kiểm chứng bằng sự cố mẫu, không mặc nhiên coi là tốt.
+Rule cháy giả nhiều lần phải bị sửa hoặc hạ mức độ, không được để ca trực tự học cách bỏ qua.
+Đó là cách Nova giữ kênh cảnh báo sạch để mỗi thông báo vẫn còn trọng lượng khi sự cố thật đến.
+
+Ghi nhớ nhanh: cảnh báo là sản phẩm dành cho con người đang trực, không phải bài kiểm tra độ siêng của hệ thống giám sát.
+
+## Code
+
+Alert rules dưới đây dùng metrics từ các bài trước của Module 09. Ngưỡng minh họa phải được hiệu chỉnh bằng số đo thật của Nova trước khi bật cho ca trực.
+
+```yaml filename=nova-alert-rules.yml
+groups:
+  - name: nova-loyalty.rules
+    rules:
+      - alert: HikariPoolExhaustion
+        expr: sum by (pool) (hikaricp_connections_threads_waiting) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Pool {{ $labels.pool }} co thread cho connection qua 2 phut"
+          runbook: "runbooks/hikari-pool-exhaustion"
+      - alert: CrmConsumerLagHigh
+        expr: sum by (group) (kafka_consumer_lag) > 10000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Consumer group {{ $labels.group }} lag vuot nguong hieu chinh"
+          runbook: "runbooks/crm-consumer-lag"
+      - alert: GatewayErrorRateHigh
+        expr: |
+          sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m]))
+          / sum(rate(http_server_requests_seconds_count[5m])) > 0.02
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Ti le loi 5xx qua gateway vuot nguong SLO tam thoi"
+          runbook: "runbooks/gateway-error-rate"
+```
+
+```java filename=SloBudgetCalculator.java
+package com.nova.loyalty.observe;
+
+public class SloBudgetCalculator {
+
+    public static long allowedFailures(long totalRequests, double sloTarget) {
+        if (totalRequests < 0L) {
+            throw new IllegalArgumentException("totalRequests must not be negative");
+        }
+        if (sloTarget <= 0.0 || sloTarget >= 1.0) {
+            throw new IllegalArgumentException("sloTarget must be between 0 and 1 exclusive");
+        }
+        double allowed = totalRequests * (1.0 - sloTarget);
+        return (long) Math.floor(allowed);
+    }
+
+    public static double consumedRatio(long failedRequests, long totalRequests, double sloTarget) {
+        long allowed = allowedFailures(totalRequests, sloTarget);
+        if (allowed == 0L) {
+            return failedRequests == 0L ? 0.0 : 1.0;
+        }
+        return (double) failedRequests / (double) allowed;
+    }
+
+    public static void main(String[] args) {
+        long total = 1_000_000L;
+        double target = 0.999;
+        System.out.println("allowedFailures=" + allowedFailures(total, target));
+        System.out.println("consumedRatio=" + consumedRatio(250L, total, target));
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Cảnh báo cháy theo từng lỗi đơn lẻ
+
+- **Triệu chứng:** Ca trực nhận hàng trăm thông báo mỗi đêm và bắt đầu bỏ qua tất cả, kể cả sự cố thật.
+- **Nguyên nhân:** Rule thiếu cửa sổ thời gian, điều kiện tỉ lệ và thời gian chờ cháy nên mọi nhiễu thoáng qua đều thành cảnh báo.
+- **Fix:** Cảnh báo theo tỉ lệ trên cửa sổ có ý nghĩa với ngân sách lỗi, kèm thời gian chờ và điều kiện mẫu số tối thiểu.
+
+### 2. Ngưỡng sao chép từ hệ thống khác
+
+- **Triệu chứng:** Lag ở mức bình thường của Nova đã bị báo là sự cố, còn mức nguy hiểm thật lại chưa chạm ngưỡng vay mượn.
+- **Nguyên nhân:** Ngưỡng không được hiệu chỉnh bằng phân phối số đo thật của hệ thống được giám sát.
+- **Fix:** Hiệu chỉnh mọi ngưỡng bằng dữ liệu lịch sử của chính Nova và review lại sau mỗi thay đổi kiến trúc lớn.
+
+### 3. Cảnh báo không có runbook
+
+- **Triệu chứng:** Người trực mới mở cảnh báo lúc nửa đêm và không biết bước đầu tiên phải làm gì.
+- **Nguyên nhân:** Rule được thêm vội trong sự cố trước mà không ai viết phần hướng dẫn hành động đi kèm.
+- **Fix:** Mọi rule production bắt buộc có liên kết runbook, và runbook được diễn tập định kỳ bằng sự cố mẫu.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Định nghĩa:** Viết SLI, SLO và ngân sách lỗi cho API tra cứu điểm và cho độ tươi dữ liệu CRM, kèm cửa sổ đo và lý do chọn cửa sổ đó.
+2. **Đọc rules:** Chỉ ra rule nào trong file mẫu dễ cháy giả nhất và viết lại biểu thức kèm điều kiện mẫu số hoặc ngữ cảnh triển khai.
+3. **Runbook:** Soạn runbook đầy đủ cho cảnh báo cạn pool `core`: triệu chứng, 5 bước khoanh vùng, 3 hành động an toàn, tiêu chí escalate và tiêu chí đóng.
+4. **Phản biện:** Vì sao cảnh báo theo tốc độ cháy ngân sách lỗi tốt hơn cảnh báo theo một ngưỡng tĩnh duy nhất? Nêu một trường hợp ngưỡng tĩnh vẫn cần thiết.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Micrometer — Documentation: https://micrometer.io/docs
+- Spring Boot — Actuator Metrics: https://docs.spring.io/spring-boot/reference/actuator/metrics.html
+- Kafka — Monitoring: https://kafka.apache.org/documentation/#monitoring
+
+## Đọc thêm
+
+Không có.

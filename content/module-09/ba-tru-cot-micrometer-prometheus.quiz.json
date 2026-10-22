@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Phân biệt được ba trụ cột observability theo câu hỏi mà mỗi trụ cột trả lời.",
+    "Tạo được counter, timer và gauge bằng Micrometer với tên và tag đúng quy ước.",
+    "Giải thích được cơ chế scrape của Prometheus và vai trò của khoảng thời gian kéo.",
+    "Nhận diện và tránh được lỗi bùng nổ cardinality do tag giá trị cao.",
+    "Kiểm chứng được đường đi metrics từ endpoint tới truy vấn Prometheus.",
+    "Bảo vệ được endpoint quản trị khỏi lộ ra ngoài gateway công cộng."
+  ],
+  "quiz": [
+    {
+      "question": "Trụ cột nào phù hợp nhất để đặt cảnh báo đánh thức đội trực?",
+      "options": [
+        "Logs chi tiết",
+        "Metrics tổng hợp theo thời gian",
+        "Traces của từng request",
+        "Ảnh chụp màn hình dashboard"
+      ],
+      "answerIndex": 1,
+      "explanation": "Metrics rẻ, liên tục và tổng hợp được theo cửa sổ thời gian nên là nền của cảnh báo. Logs và traces dùng để điều tra sau khi cảnh báo cháy."
+    },
+    {
+      "question": "Counter trong Micrometer có đặc tính gì?",
+      "options": [
+        "Tăng giảm tùy ý",
+        "Luôn phản ánh giá trị tức thời",
+        "Chỉ tăng, dùng để đếm sự kiện tích lũy như số giao dịch",
+        "Chỉ đo thời gian"
+      ],
+      "answerIndex": 2,
+      "explanation": "Counter đơn điệu tăng; tỉ lệ theo thời gian được suy ra ở tầng truy vấn. Giá trị tức thời là việc của gauge, thời lượng là việc của timer."
+    },
+    {
+      "question": "Vì sao không được đưa mã thành viên vào tag?",
+      "options": [
+        "Vì mỗi giá trị tag sinh một chuỗi thời gian riêng, cardinality vô hạn sẽ làm phình và sập hệ thống lưu trữ metrics",
+        "Vì tag không chứa được số",
+        "Vì Micrometer cấm tag dạng chuỗi",
+        "Vì mã thành viên là dữ liệu bí mật duy nhất cần giấu"
+      ],
+      "answerIndex": 0,
+      "explanation": "Bùng nổ cardinality là lỗi vận hành kinh điển nhất của metrics. Nhu cầu chi tiết theo cá thể thuộc về logs và traces."
+    },
+    {
+      "question": "Timer cho biết những gì hơn một counter đơn thuần?",
+      "options": [
+        "Chỉ tổng số lần gọi",
+        "Tên của người gọi",
+        "Trạng thái của database",
+        "Cả số lần và phân phối thời gian, gồm các phân vị độ trễ"
+      ],
+      "answerIndex": 3,
+      "explanation": "Timer ghi nhận phân phối thời lượng nên mới thấy được phần đuôi độ trễ mà giá trị trung bình che giấu."
+    },
+    {
+      "question": "Prometheus lấy metrics bằng cơ chế nào?",
+      "options": [
+        "Ứng dụng đẩy từng mẫu lên Prometheus",
+        "Prometheus chủ động kéo từ endpoint HTTP theo chu kỳ đã cấu hình",
+        "Đọc trực tiếp file log của ứng dụng",
+        "Qua Kafka topic chuyên dụng"
+      ],
+      "answerIndex": 1,
+      "explanation": "Mô hình kéo giúp Prometheus biết target còn sống hay không qua chính lần kéo và giữ cấu hình tập trung ở phía giám sát."
+    },
+    {
+      "question": "Gauge phù hợp đo đại lượng nào sau đây?",
+      "options": [
+        "Tổng số giao dịch từ khi khởi động",
+        "Tổng số lỗi tích lũy",
+        "Thời gian xử lý một request",
+        "Số connection đang hoạt động của pool tại thời điểm lấy mẫu"
+      ],
+      "answerIndex": 3,
+      "explanation": "Gauge phản ánh giá trị tức thời lên xuống tự do, rất hợp cho mức dùng tài nguyên như connection, hàng đợi và heap."
+    },
+    {
+      "question": "Sau khi cấu hình scrape, kiểm chứng tối thiểu gồm những gì?",
+      "options": [
+        "Chỉ nhìn file cấu hình không lỗi cú pháp",
+        "Khởi động lại toàn bộ hệ thống",
+        "Endpoint trả dữ liệu, target được Prometheus nhận ở trạng thái hoạt động, truy vấn mẫu trả chuỗi số thật",
+        "Chờ một tuần rồi xem dashboard"
+      ],
+      "answerIndex": 2,
+      "explanation": "Ba bước kiểm chứng khép kín đường đi của dữ liệu; thiếu bước nào cũng có thể để lại một hệ thống giám sát trống rỗng."
+    },
+    {
+      "question": "Endpoint metrics cần được đối xử thế nào về bảo mật?",
+      "options": [
+        "Chỉ expose trong mạng quản trị và yêu cầu xác thực như endpoint quản trị khác",
+        "Mở công khai qua gateway cho tiện",
+        "Không cần quan tâm vì metrics không nhạy cảm",
+        "Đặt mật khẩu yếu dùng chung"
+      ],
+      "answerIndex": 0,
+      "explanation": "Metrics lộ cấu trúc nội bộ và thông tin vận hành. Chúng phải nằm sau lớp bảo vệ, không đi qua route công cộng của gateway."
+    },
+    {
+      "question": "Tag tốt có đặc điểm nào?",
+      "options": [
+        "Tập giá trị vô hạn và chi tiết tối đa",
+        "Luôn chứa mã định danh của người dùng để tiện tra cứu",
+        "Tập giá trị hữu hạn, nhỏ và ổn định như route, kết quả, tên datasource",
+        "Thay đổi theo từng request"
+      ],
+      "answerIndex": 2,
+      "explanation": "Tag là chiều cắt lát tổng hợp: hữu hạn và ổn định là điều kiện bắt buộc để hệ thống metrics sống được lâu dài."
+    },
+    {
+      "question": "Khi độ trễ trung bình đẹp nhưng khách vẫn phàn nàn chậm, nên nhìn số nào?",
+      "options": [
+        "Tổng số request",
+        "Phân vị cao của timer cho đúng route bị phàn nàn",
+        "Số lượng instance",
+        "Thời gian khởi động ứng dụng"
+      ],
+      "answerIndex": 1,
+      "explanation": "Trải nghiệm xấu tập trung ở phần đuôi phân phối. Phân vị cao theo từng route là nơi sự thật về độ trễ nằm."
+    }
+  ]
+}

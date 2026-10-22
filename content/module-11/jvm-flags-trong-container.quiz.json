@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Phân biệt được phạm vi áp dụng của JAVA_TOOL_OPTIONS và JDK_JAVA_OPTIONS.",
+    "Giải thích được cơ chế JVM nhận biết giới hạn bộ nhớ của container trên Java 21.",
+    "Cấu hình được heap bằng MaxRAMPercentage và nêu được lý do tránh ghim cứng giá trị tuyệt đối.",
+    "Mô tả được hiện tượng OOMKilled và cách phân biệt với lỗi hết heap của JVM.",
+    "Nêu được biện pháp chuẩn hóa timezone cho nghiệp vụ theo giờ Asia/Saigon.",
+    "Nhận diện được triệu chứng khởi động chậm liên quan tới nguồn entropy."
+  ],
+  "quiz": [
+    {
+      "answerIndex": 3,
+      "explanation": "MaxRAMPercentage suy ra heap từ giới hạn RAM của container nên cùng một cấu hình chạy đúng ở nhiều môi trường có limit khác nhau.",
+      "options": [
+        "Đặt -Xmx bằng đúng số RAM của máy chủ vật lý",
+        "Không đặt gì và để JVM dùng mặc định của máy chủ vật lý",
+        "Đặt heap bằng tổng RAM của cả node Kubernetes",
+        "Dùng MaxRAMPercentage để heap là một tỷ lệ của RAM container"
+      ],
+      "question": "Cách đặt heap bền vững nhất khi limit của container thay đổi giữa các môi trường?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "OOMKilled là việc nhân hệ điều hành giết tiến trình vượt limit của container. Khác với lỗi hết heap, nó thường không để lại ngoại lệ Java trong log.",
+      "options": [
+        "JVM tự ném ngoại lệ hết heap",
+        "Ứng dụng ghi log lỗi rồi tự thoát",
+        "Kubernetes khởi động lại node",
+        "Tiến trình bị nhân hệ điều hành giết vì tổng bộ nhớ vượt giới hạn của container"
+      ],
+      "question": "OOMKilled trong Kubernetes nghĩa là gì?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "JAVA_TOOL_OPTIONS được mọi tiến trình Java trong môi trường đọc, kể cả công cụ; JDK_JAVA_OPTIONS tập trung cho riêng lệnh java launcher nên sạch hơn cho ứng dụng.",
+      "options": [
+        "Đúng — JAVA_TOOL_OPTIONS áp dụng cho mọi tiến trình Java, JDK_JAVA_OPTIONS chỉ cho lệnh java launcher",
+        "Sai — cả hai hoàn toàn giống hệt nhau",
+        "Đúng — nhưng JAVA_TOOL_OPTIONS chỉ dùng cho Maven",
+        "Sai — JDK_JAVA_OPTIONS áp dụng cho mọi tiến trình kể cả không phải Java"
+      ],
+      "question": "Khẳng định về JAVA_TOOL_OPTIONS và JDK_JAVA_OPTIONS nào là đúng?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Nova Loyalty tính điểm hết hạn và báo cáo theo giờ Việt Nam. Container mặc định UTC sẽ gây sai lệch dữ liệu lặng lẽ nếu không chuẩn hóa timezone tường minh.",
+      "options": [
+        "UTC vì container luôn mặc định UTC và không đổi được",
+        "Asia/Saigon đặt tường minh cho JVM, nhất quán với quy ước lưu trữ ở database",
+        "Giờ của máy của developer",
+        "Không cần quan tâm timezone khi đã dùng kiểu dữ liệu có múi giờ"
+      ],
+      "question": "Timezone nào cần được đặt tường minh cho service của Nova Loyalty?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Ngoài heap còn metaspace, thread stack, direct buffer của các client như Kafka và vùng nhớ native. Nhiều datasource và pool tại Nova Loyalty khiến phần này đáng kể.",
+      "options": [
+        "Chỉ heap mới tốn RAM thật",
+        "Ngoài heap không tồn tại trong container",
+        "Metaspace, thread stack, bộ đệm trực tiếp và bộ nhớ native cũng nằm trong giới hạn của container",
+        "Kubernetes tự cấp thêm RAM cho phần ngoài heap"
+      ],
+      "question": "Vì sao heap không được chiếm 100 phần trăm RAM của container?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Các bản JDK hiện đại mặc định đọc giới hạn từ cơ chế container của hệ điều hành, thay vì đọc thông số của máy chủ vật lý như thời kỳ đầu.",
+      "options": [
+        "JVM không bao giờ biết về container",
+        "JVM trên Java 21 mặc định nhận biết container và đọc giới hạn CPU/bộ nhớ của container",
+        "Phải cài thêm agent riêng mới nhận biết được",
+        "Chỉ nhận biết khi chạy trên một cloud cụ thể"
+      ],
+      "question": "Hành vi nhận biết container của JVM trên Java 21 là gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Treo ở giai đoạn khởi tạo bảo mật mà không có lỗi rõ ràng là dấu hiệu kinh điển của việc chờ entropy. Cần xác minh theo tài liệu JDK thay vì áp dụng mẹo truyền miệng.",
+      "options": [
+        "Thiếu Actuator",
+        "Sai timezone",
+        "Nguồn entropy khan hiếm khiến thao tác ngẫu nhiên an toàn bị chặn chờ",
+        "Hết hạn ngạch của rate limiter"
+      ],
+      "question": "Triệu chứng nào gợi ý vấn đề entropy khi khởi động trong container?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Công cụ in flags của JVM cho thấy giá trị hiệu lực cuối cùng sau mọi lớp ghi đè — bằng chứng tin cậy nhất khi điều tra cấu hình JVM.",
+      "options": [
+        "Đoán qua Dockerfile",
+        "Dùng công cụ in cờ hiệu lực của JVM (ví dụ PrintFlagsFinal) để xem giá trị cuối cùng đang áp dụng",
+        "Nhìn vào kích thước file jar",
+        "Hỏi người viết Dockerfile"
+      ],
+      "question": "Cách kiểm chứng cờ JVM đang hiệu lực một cách đáng tin cậy nhất là gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Đó là bài học khóa phiên bản xuyên suốt nền tảng: Java 21 đi cùng Spring Boot 3.3.x. Dockerfile và cờ JVM phải bám cặp này.",
+      "options": [
+        "Java 11 với Boot 2.7",
+        "Java 17 với Boot 3.2",
+        "Java 21 với Boot 3.3.x",
+        "Java 22 với Boot 4.x"
+      ],
+      "question": "Theo chuẩn của nền tảng học này, cặp Java và Spring Boot đang dùng là gì?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Khi cùng một tham số xuất hiện ở nhiều kênh, kênh tường minh trên dòng lệnh thường có tiếng nói cuối cùng — nhưng hãy verify với docs của bản JDK đang dùng vì bài học đã cảnh báo chi tiết này.",
+      "options": [
+        "Đúng theo nguyên tắc chung — đối số tường minh trên dòng lệnh thường có ưu tiên cuối cùng, cần đối chiếu docs của bản JDK",
+        "Sai — biến môi trường luôn thắng mọi thứ",
+        "Đúng — và Dockerfile luôn thắng dòng lệnh",
+        "Sai — không bao giờ xảy ra ghi đè"
+      ],
+      "question": "Nguyên tắc chung về ưu tiên khi cùng một cờ xuất hiện ở nhiều nơi?"
+    }
+  ]
+}

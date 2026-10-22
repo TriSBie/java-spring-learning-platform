@@ -1,0 +1,205 @@
+---
+title: "Deployment, Service, Ingress và probes qua Actuator"
+module: 11
+level: "Middle"
+duration: 55
+order: 3
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Viết được bộ ba manifest Deployment, Service và Ingress hoàn chỉnh cho một service Spring Boot của Nova Loyalty.
+- Phân biệt được liveness probe và readiness probe về hậu quả khi thất bại, và nối được chúng tới đúng nhóm health của Actuator.
+- Giải thích được vì sao readiness phải phản ánh khả năng phục vụ thật (bao gồm phụ thuộc trọng yếu) trong khi liveness chỉ nên kiểm tra tiến trình còn sống.
+
+## Vì sao cần biết
+
+Nova Loyalty chạy trên Kubernetes với nhiều replica cho mỗi service. Khi một pod của service điểm vừa khởi động nhưng chưa nối được tới database core, hoặc tệ hơn là treo cứng nhưng tiến trình vẫn còn, Kubernetes cần tín hiệu đúng để quyết định: chưa đưa traffic vào pod chưa sẵn sàng, và khởi động lại pod đã chết thật. Tín hiệu đó là probes. Cấu hình probes sai là một trong những nguyên nhân sự cố oan phổ biến nhất: liveness kiểm tra cả database khiến cả cụm pod bị khởi động lại dây chuyền đúng lúc database chập chờn. Bài này nối thẳng Actuator health groups của Spring Boot 3.3 vào probes để bạn tránh được cái bẫy đó tại Nova Loyalty.
+
+## Nội dung chính
+
+### Ba đối tượng nền tảng
+
+Deployment quản lý số lượng và vòng đời của pod theo một template: nó đảm bảo luôn có đủ replica mong muốn và thực hiện rolling update khi template thay đổi. Service cho các pod một định danh mạng ổn định và cân bằng tải giữa các pod khỏe phía sau nó, bất kể pod bị thay thế bao nhiêu lần. Ingress là điểm vào HTTP từ bên ngoài cluster, định tuyến theo host/path tới đúng Service — tại Nova Loyalty, Ingress (cùng gateway phía trước) là nơi các tiền tố `/v4/gs/*`, `/v4/os/*`, `/v4/ws/*` được ánh xạ vào từng nhóm service.
+
+### Liveness và readiness: hai câu hỏi khác nhau
+
+Readiness probe trả lời câu hỏi "pod này đã sẵn sàng nhận traffic chưa". Nếu readiness thất bại, pod bị rút khỏi danh sách nhận traffic của Service nhưng không bị giết. Liveness probe trả lời câu hỏi "tiến trình này còn sống hay đã treo cứng". Nếu liveness thất bại đủ số lần, Kubernetes giết và tạo lại container.
+
+Nhầm lẫn hai vai trò này gây hậu quả ngược đời: nếu liveness kiểm tra một phụ thuộc bên ngoài như database, khi database chập chờn mọi pod sẽ bị giết và khởi động lại liên tục, biến một sự cố phụ thuộc thành sự cố toàn hệ thống.
+
+<Mermaid chart={`flowchart TB
+  Ingress[Ingress<br/>/v4/os/**] --> Svc[Service<br/>nova-points]
+  Svc --> Ready{Readiness OK?}
+  Ready -->|đúng| Pod1[Pod sẵn sàng<br/>nhận traffic]
+  Ready -->|sai| Pod2[Pod chưa sẵn sàng<br/>không nhận traffic, không bị giết]
+  Live{Liveness OK?} -->|sai liên tục| Kill[Kubernetes<br/>khởi động lại container]
+  Live --> Pod1`} label="Readiness quyết định pod có nhận traffic hay không; liveness thất bại liên tục khiến container bị khởi động lại." />
+
+### Health groups của Actuator
+
+Spring Boot Actuator tổ chức health thành các group chuyên dụng cho Kubernetes: nhóm `liveness` chỉ phản ánh trạng thái sống nội tại của ứng dụng, nhóm `readiness` phản ánh khả năng sẵn sàng phục vụ và có thể gồm các kiểm tra phụ thuộc mà team chủ động đưa vào. Các endpoint tương ứng nằm dưới đường dẫn health của Actuator với tên group ở cuối.
+
+Nguyên tắc thiết kế: giữ liveness "nông" — chỉ gồm những gì chứng minh tiến trình không treo. Readiness mới là nơi đặt các kiểm tra như kết nối database hoặc trạng thái khởi tạo xong của các thành phần quan trọng. Tại Nova Loyalty, readiness của service điểm nên tính tới khả năng nối tới datasource core; nhưng không một probe nào nên kiểm tra cả 5 datasource (core, gift, report, legacy, audit) vì như vậy một datasource phụ trợ sập sẽ rút toàn bộ traffic của service chính.
+
+### Tham số thời gian của probe
+
+Ba tham số phải được suy ra từ hành vi khởi động thật của ứng dụng: thời gian chờ trước lần kiểm tra đầu tiên phải đủ cho JVM và Spring context khởi động; chu kỳ kiểm tra và số lần thất bại liên tiếp quyết định độ trễ phát hiện sự cố. Đặt ngưỡng quá hung hăng khiến pod khởi động chậm bị giết oan trong vòng lặp khởi động lại; đặt quá lỏng khiến pod treo tồn tại lâu mà không ai biết. Với ứng dụng Spring Boot có thời gian khởi động đáng kể, cơ chế startup probe là lựa chọn sạch hơn việc nới lỏng liveness.
+
+### Service selector và nhãn phải khớp tuyệt đối
+
+Service tìm pod qua selector khớp với nhãn trên pod template của Deployment. Chỉ cần lệch một nhãn, Service sẽ có không đầu cuối nào phía sau và mọi request nhận lỗi dù pod vẫn chạy khỏe — lỗi cấu hình kinh điển mà bài này giúp bạn nhận diện trong vài giây thay vì vài giờ.
+
+## Code
+
+Deployment hoàn chỉnh với cả hai probe nối tới health group của Actuator:
+
+```yaml filename=deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nova-points
+  labels:
+    app: nova-points
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nova-points
+  template:
+    metadata:
+      labels:
+        app: nova-points
+    spec:
+      containers:
+        - name: points
+          image: registry.example.invalid/nova/points:1.4.2
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+```
+
+Service và Ingress khớp nhãn và tiền tố của Nova Loyalty:
+
+```yaml filename=service-ingress.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: nova-points
+spec:
+  selector:
+    app: nova-points
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nova-points
+spec:
+  rules:
+    - host: api.example.invalid
+      http:
+        paths:
+          - path: /v4/os
+            pathType: Prefix
+            backend:
+              service:
+                name: nova-points
+                port:
+                  number: 80
+```
+
+Cấu hình phía Spring Boot để công khai đúng hai health group cần cho probe:
+
+```yaml filename=application-actuator.yml
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+```
+
+## Sai lầm thường gặp
+
+### 1. Liveness probe kiểm tra database
+
+- **Triệu chứng:** Khi database chập chờn vài phút, toàn bộ pod bị khởi động lại dây chuyền và sự cố lan rộng thay vì tự giới hạn ở tầng dữ liệu.
+- **Nguyên nhân:** Liveness bị biến thành kiểm tra phụ thuộc; thất bại của database bị diễn giải thành "tiến trình đã chết" ở mọi pod cùng lúc.
+- **Fix:** Liveness chỉ dùng health group `liveness` của Actuator (trạng thái sống nội tại); mọi kiểm tra phụ thuộc thuộc về readiness.
+
+### 2. Thời gian chờ ban đầu ngắn hơn thời gian khởi động thật
+
+- **Triệu chứng:** Pod rơi vào vòng lặp bị giết và tạo lại ngay từ lần deploy đầu tiên dù ứng dụng hoàn toàn khỏe khi chạy ở môi trường khác.
+- **Nguyên nhân:** Probe bắt đầu kiểm tra và đếm thất bại trước khi JVM cộng Spring context kịp khởi động xong; ngưỡng thất bại bị dùng hết trong giai đoạn khởi động bình thường.
+- **Fix:** Đo thời gian khởi động thật rồi đặt độ trễ ban đầu và ngưỡng phù hợp, hoặc dùng startup probe để bảo vệ giai đoạn khởi động.
+
+### 3. Selector của Service không khớp nhãn của pod
+
+- **Triệu chứng:** Pod ở trạng thái chạy và sẵn sàng nhưng mọi request qua Service đều lỗi không có đầu cuối; kiểm tra danh sách đầu cuối của Service cho kết quả rỗng.
+- **Nguyên nhân:** Nhãn trên pod template của Deployment lệch với selector của Service, thường do sửa một nơi mà quên nơi còn lại.
+- **Fix:** Đối chiếu cặp selector và nhãn như một hợp đồng bất biến; đưa việc kiểm tra này vào checklist review manifest.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Viết manifest:** Viết bộ ba Deployment, Service, Ingress cho service gift của Nova Loyalty với tiền tố `/v4/gs`, tự chọn số replica và tham số probe kèm lý do cho từng con số thời gian.
+2. **Đọc manifest trả lời:** Trong `deployment.yaml` ở mục Code, một pod cần tối đa bao lâu kể từ khi container bắt đầu chạy mới bị liveness kết luận là chết? Viết phép tính dựa trên các tham số đã khai báo.
+3. **Thiết kế readiness:** Liệt kê các kiểm tra bạn sẽ đưa vào readiness của service điểm tại Nova Loyalty và các kiểm tra bạn cố ý loại ra, mỗi mục kèm lý do liên quan tới 5 datasource.
+4. **Kịch bản sự cố:** Database core mất kết nối 3 phút rồi hồi phục. Dự đoán hành vi của cụm pod trong hai thiết kế: liveness kiểm tra database so với liveness chỉ kiểm tra trạng thái sống nội tại. Nêu thiệt hại phụ của mỗi thiết kế.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Kubernetes — Liveness, Readiness and Startup Probes: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+- Kubernetes — Deployments: https://kubernetes.io/docs/concepts/workloads/controllers/deployment/
+- Spring Boot — Actuator, Kubernetes health probes: https://docs.spring.io/spring-boot/reference/actuator/endpoints.html
+
+## Đọc thêm
+
+Không có.

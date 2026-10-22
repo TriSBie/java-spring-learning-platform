@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Phân biệt được phiên bản API, phiên bản artifact theo semantic versioning và định danh build theo commit/digest.",
+    "Giải thích được khi nào tăng major, minor và patch cho một service.",
+    "Thực thi được rollback bằng rollout undo theo revision và bằng cách ghim lại digest đã biết là tốt.",
+    "Giải thích được vì sao database không có thao tác rollback tổng quát như ứng dụng không trạng thái.",
+    "Phát biểu được chiến lược sửa tiến và vai trò của tương thích hai chiều đối với khả năng quay lui.",
+    "Soạn được biên bản phát hành có sẵn đường lui cho một đợt phát hành của Nova Loyalty."
+  ],
+  "quiz": [
+    {
+      "answerIndex": 3,
+      "explanation": "Thay đổi phá vỡ hợp đồng mà bên phụ thuộc đang dùng là lý do tăng major theo semantic versioning — bất kể quy mô code thay đổi lớn hay nhỏ.",
+      "options": [
+        "Tăng patch vì chỉ bỏ một trường",
+        "Tăng minor vì thêm/bớt trường đều là thay đổi nhỏ",
+        "Không cần tăng phiên bản nếu có ghi chú phát hành",
+        "Tăng major vì đây là thay đổi phá vỡ tính tương thích của hợp đồng API"
+      ],
+      "question": "Bỏ một trường khỏi phản hồi API mà đối tác đang dùng cần tăng thành phần nào của semantic versioning?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Digest được suy ra từ nội dung của image nên bất biến. Tag là con trỏ có thể được gán lại cho nội dung khác bởi một lần build sau.",
+      "options": [
+        "Tag dài hơn digest",
+        "Tag được ký số còn digest thì không",
+        "Không có khác biệt thực tế",
+        "Digest là định danh theo nội dung và bất biến; tag có thể bị trỏ lại sang nội dung khác"
+      ],
+      "question": "Khác biệt quyết định giữa tag và digest của image là gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Cơ chế quay về revision trước là thao tác rollback chuẩn của Deployment trên Kubernetes, đưa pod về đúng template của revision được chọn.",
+      "options": [
+        "Xóa toàn bộ namespace rồi tạo lại",
+        "Dùng cơ chế quay về revision trước của Deployment (rollout undo)",
+        "Sửa trực tiếp từng pod đang chạy",
+        "Tăng số replica của bản mới"
+      ],
+      "question": "Cách quay lui một Deployment trên Kubernetes về bản trước là gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Dữ liệu tích lũy và có thể đã bị bản mới biến đổi theo cách bản cũ không hiểu. Không tồn tại hoàn tác tổng quát cho trạng thái, nên chiến lược chủ đạo là sửa tiến.",
+      "options": [
+        "Vì database luôn sao lưu mỗi giây",
+        "Vì rollback database thực ra dễ hơn ứng dụng",
+        "Vì dữ liệu mang trạng thái tích lũy và dữ liệu do bản mới ghi ra có thể không tương thích với bản cũ — không có hoàn tác tổng quát an toàn",
+        "Vì Kubernetes cấm chạm vào database"
+      ],
+      "question": "Vì sao rollback của database khác hẳn rollback của ứng dụng?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Fix forward giữ hệ thống ở trạng thái dữ liệu hiện tại và vá bằng thay đổi mới có kiểm soát, thay vì cố quay ngược trạng thái — lựa chọn chuẩn khi hỏng nằm ở tầng dữ liệu.",
+      "options": [
+        "Quay toàn hệ thống về bản sao lưu cũ nhất",
+        "Sửa tiến: giữ nguyên trạng thái dữ liệu hiện tại và vá bằng một migration hoặc bản phát hành mới có kiểm soát",
+        "Tắt toàn bộ dịch vụ vô thời hạn",
+        "Xóa dữ liệu phát sinh sau phát hành"
+      ],
+      "question": "Chiến lược sửa tiến (fix forward) nghĩa là gì?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Tương thích hai chiều là điều kiện tiên quyết: bản ứng dụng cũ phải sống được với schema mới thì việc quay lui ứng dụng mới thật sự là đường lui an toàn.",
+      "options": [
+        "Đúng — bản cũ chỉ quay lui an toàn khi schema mới vẫn tương thích với nó",
+        "Sai — rollback ứng dụng không liên quan gì tới schema",
+        "Đúng — nhưng chỉ đúng với datasource báo cáo",
+        "Sai — Kubernetes tự kiểm tra tương thích trước khi cho quay lui"
+      ],
+      "question": "Khẳng định 'kỷ luật tương thích hai chiều của migration là điều kiện để rollback ứng dụng an toàn' đúng hay sai?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "revisionHistoryLimit quyết định số revision cũ được Deployment giữ lại. Giữ quá ít sẽ làm mất điểm quay lui trước khi cửa sổ quan sát sự cố kết thúc.",
+      "options": [
+        "Số lượng pod tối đa",
+        "Thời gian chờ của probe",
+        "Số revision cũ được giữ lại làm điểm quay lui cho Deployment",
+        "Số lần retry của pipeline"
+      ],
+      "question": "Tham số giới hạn lịch sử revision của Deployment ảnh hưởng gì tới rollback?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Họ tiền tố /v4/* ở gateway là hợp đồng API mà đối tác phụ thuộc — khác với phiên bản artifact của từng service phía sau nó.",
+      "options": [
+        "Phiên bản artifact của service điểm",
+        "Hợp đồng API công khai mà đối tác và các hệ thống khác phụ thuộc vào",
+        "Digest của image hiện tại",
+        "Phiên bản của Kubernetes đang chạy"
+      ],
+      "question": "Tiền tố /v4/* tại gateway của Nova Loyalty thuộc khái niệm phiên bản nào?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Khôi phục từ bản sao lưu đánh đổi bằng việc mất mọi dữ liệu phát sinh sau điểm sao lưu — cái giá đó chỉ đáng trả khi dữ liệu đã hỏng ở mức không sửa tiến được.",
+      "options": [
+        "Luôn là lựa chọn đầu tiên khi có sự cố",
+        "Không bao giờ được phép dùng",
+        "Là lựa chọn cuối cùng khi dữ liệu hỏng tới mức không sửa tiến được, vì nó đánh đổi bằng dữ liệu phát sinh sau điểm sao lưu",
+        "Chỉ dùng cho môi trường dev"
+      ],
+      "question": "Khôi phục database từ bản sao lưu nên được nhìn nhận thế nào?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Đường lui tốt được thiết kế trước: biên bản chứa sẵn định danh bản trước và thao tác cụ thể, diễn tập định kỳ biến thao tác thành phản xạ thay vì ứng biến.",
+      "options": [
+        "Thuê thêm người trực đêm",
+        "Có biên bản phát hành chứa sẵn đường lui cho từng đợt và diễn tập thao tác quay lui định kỳ",
+        "Viết thêm tài liệu sau sự cố",
+        "Tăng ngân sách hạ tầng"
+      ],
+      "question": "Điều gì biến rollback từ ứng biến thành thao tác vận hành bình tĩnh?"
+    }
+  ]
+}

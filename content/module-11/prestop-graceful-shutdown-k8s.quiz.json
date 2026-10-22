@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Vẽ được chuỗi sự kiện đầy đủ khi pod bị xóa, từ rút đầu cuối tới SIGKILL.",
+    "Giải thích được vai trò chờ lan truyền của hook preStop dạng ngủ ngắn.",
+    "Phát biểu được bất đẳng thức ngân sách: preStop cộng draining cộng đệm phải nằm trong terminationGracePeriodSeconds.",
+    "Cấu hình được server.shutdown graceful và thời gian chờ tắt theo giai đoạn ở Spring Boot.",
+    "Căn chỉnh được manifest cho ngân sách draining 75 giây của consumer CRM tại Nova Loyalty.",
+    "Nêu được vì sao entrypoint dạng exec là điều kiện để SIGTERM tới được tiến trình Java."
+  ],
+  "quiz": [
+    {
+      "answerIndex": 3,
+      "explanation": "75 giây là ngân sách draining ở tầng ứng dụng của Nova Loyalty cho consumer CRM (ngừng poll mới, xử lý xong message đang dở, commit offset) — dữ kiện gốc xuyên suốt Module 06 và bài này.",
+      "options": [
+        "Thời gian build image tối đa",
+        "Thời gian timeout mặc định của Kubernetes",
+        "Thời gian chờ của liveness probe",
+        "Ngân sách draining ở tầng ứng dụng của consumer CRM tại Nova Loyalty kể từ tín hiệu tắt"
+      ],
+      "question": "Con số 75 giây ở Nova Loyalty gắn với điều gì?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Cả hook preStop và quá trình tắt của ứng dụng đều chạy trong cửa sổ terminationGracePeriodSeconds. Nó là trần tổng, không phải thời gian cộng thêm sau preStop.",
+      "options": [
+        "Chỉ tính từ sau khi preStop chạy xong",
+        "Được cộng thêm vào thời gian draining của ứng dụng",
+        "Không liên quan tới preStop",
+        "Là tổng ngân sách chứa cả thời gian chạy preStop lẫn thời gian tắt của ứng dụng trước khi SIGKILL xuất hiện"
+      ],
+      "question": "Mối quan hệ giữa preStop và terminationGracePeriodSeconds là gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Việc rút pod khỏi danh sách đầu cuối cần thời gian lan truyền tới các thành phần định tuyến. Ngủ ngắn ở preStop giúp traffic mới gần như ngừng hẳn trước khi ứng dụng nhận SIGTERM.",
+      "options": [
+        "Để JVM có thời gian khởi động GC",
+        "Để việc rút pod khỏi danh sách đầu cuối kịp lan truyền, tránh request mới bay vào pod sắp tắt",
+        "Để tiết kiệm chi phí hạ tầng",
+        "Vì Kubernetes bắt buộc mọi hook phải ngủ"
+      ],
+      "question": "Vì sao preStop của web service thường là một lệnh ngủ ngắn?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "server.shutdown graceful khiến máy chủ web ngừng nhận kết nối mới nhưng chờ request đang xử lý hoàn tất trong giới hạn giai đoạn vòng đời.",
+      "options": [
+        "server.port đổi sang cổng khác",
+        "Ứng dụng từ chối mọi request ngay khi nhận tín hiệu, kể cả đang xử lý dở",
+        "Máy chủ ngừng nhận kết nối mới nhưng chờ request đang xử lý hoàn tất — đó là server.shutdown ở chế độ graceful của Spring Boot",
+        "Kafka tự động commit mọi offset"
+      ],
+      "question": "Chế độ tắt từ tốn của Spring Boot làm gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Thiếu ngân sách, pod bị SIGKILL giữa chừng: offset Kafka chưa commit nên message bị xử lý lại. Idempotency cứu dữ liệu nhưng cái giá là xử lý trùng không cần thiết sau mỗi lần deploy.",
+      "options": [
+        "Không có hậu quả gì",
+        "Consumer bị giết cứng trước khi commit offset, message bị xử lý lại hàng loạt ở instance khác",
+        "Kafka tự xóa topic",
+        "Pod không bao giờ bị xóa nữa"
+      ],
+      "question": "Hậu quả nếu terminationGracePeriodSeconds nhỏ hơn ngân sách draining 75 giây?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Shell làm tiến trình chính sẽ nhận tín hiệu thay cho Java và thường không chuyển tiếp đúng cách — lỗi đã được cảnh báo từ bài Dockerfile với entrypoint dạng exec.",
+      "options": [
+        "Đúng — shell là tiến trình chính nên nhận tín hiệu thay Java và thường không chuyển tiếp đúng cách",
+        "Sai — shell luôn chuyển tiếp hoàn hảo",
+        "Đúng — nhưng chỉ đúng với consumer Kafka",
+        "Sai — SIGTERM luôn tới mọi tiến trình con"
+      ],
+      "question": "Khẳng định 'entrypoint qua shell có thể khiến Java không nhận được SIGTERM' đúng hay sai?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "10 cộng 75 cộng 15 bằng 100 giây — đúng con số trong manifest mẫu của bài. Đặt đúng 75 sẽ khiến phần preStop ăn mất thời gian draining thật.",
+      "options": [
+        "75 giây",
+        "85 giây",
+        "100 giây",
+        "Không giới hạn"
+      ],
+      "question": "Với preStop 10 giây, draining 75 giây và đệm 15 giây, terminationGracePeriodSeconds tối thiểu là bao nhiêu?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Mốc đáng tin duy nhất là diễn tập tắt thật trên môi trường giống production, đo thời gian thực tế và lượng xử lý trùng — manifest đúng cú pháp không đảm bảo đúng hành vi.",
+      "options": [
+        "Đọc lại manifest ba lần",
+        "Diễn tập xóa pod trên môi trường giống production và đo thời gian tắt thật cùng số message bị xử lý lại",
+        "Chỉ kiểm tra cú pháp YAML",
+        "Hỏi team hạ tầng là đủ"
+      ],
+      "question": "Cách kiểm chứng đáng tin cậy nhất cho thiết kế graceful shutdown là gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Phase cao khiến thành phần này dừng muộn trong chuỗi tắt của context (theo quy ước phase của SmartLifecycle) — phù hợp để điều phối việc ngừng nhận việc mới trước khi các thành phần khác đóng. Hãy đối chiếu ngữ nghĩa phase với docs khi áp dụng.",
+      "options": [
+        "Thứ tự khai báo bean trong file cấu hình",
+        "Mức độ ưu tiên của thread",
+        "Thứ tự khởi động/dừng của thành phần trong vòng đời của Spring context",
+        "Số lượng replica"
+      ],
+      "question": "Trong SmartLifecycle, giá trị phase quyết định điều gì?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Kafka tại Nova Loyalty được khóa ở bản 3.8 trong toàn bộ nền tảng học — cấu hình consumer và hành vi tắt phải bám theo tài liệu của bản này.",
+      "options": [
+        "Đúng — nền tảng khóa Kafka ở bản 3.8",
+        "Sai — Kafka ở bản 2.8",
+        "Đúng — nhưng chỉ cho môi trường dev",
+        "Sai — không có khóa phiên bản nào cho Kafka"
+      ],
+      "question": "Khẳng định 'Kafka của Nova Loyalty được khóa ở phiên bản 3.8 trong nền tảng này' đúng hay sai?"
+    }
+  ]
+}

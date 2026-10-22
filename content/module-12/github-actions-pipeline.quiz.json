@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Giải thích được mô hình workflow, job, step và runner của GitHub Actions.",
+    "Viết được workflow tách job test và job build image với quan hệ phụ thuộc rõ ràng.",
+    "Thực hành được kỷ luật secret: chỉ qua kho secret, không bao giờ in ra log.",
+    "Khai báo được quyền tối thiểu cho token tự động của workflow.",
+    "Ghim được các action bên thứ ba ở phiên bản cụ thể đã kiểm chứng.",
+    "Thiết kế được tag và digest truy vết được cho image, phục vụ triển khai và rollback."
+  ],
+  "quiz": [
+    {
+      "answerIndex": 3,
+      "explanation": "Mặc định mọi job chạy song song. Muốn image chỉ sinh ra từ code đã qua kiểm thử, job build phải khai báo phụ thuộc vào job test để chỉ chạy khi test thành công.",
+      "options": [
+        "Thứ tự viết trong file quyết định thứ tự chạy",
+        "Job có tên ngắn hơn chạy trước",
+        "Job build luôn tự chờ job test",
+        "Quan hệ phụ thuộc được khai báo giữa các job (job sau chỉ chạy khi job trước thành công)"
+      ],
+      "question": "Điều gì đảm bảo job build image chỉ chạy sau khi job test đạt?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Secret chỉ được cấp qua kho secret và cơ chế truyền chuyên dụng. In ra log hay ghi cứng vào file đều làm lộ credential cho bất kỳ ai đọc được log hoặc repo.",
+      "options": [
+        "Ghi vào file workflow nhưng đặt trong comment",
+        "In ra log một lần để debug rồi xóa sau",
+        "Chia sẻ qua kênh chat của team cho tiện",
+        "Chỉ lấy từ kho secret của GitHub và truyền qua cơ chế dành riêng, không bao giờ in ra log"
+      ],
+      "question": "Cách xử lý secret đúng trong GitHub Actions là gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Ghim phiên bản cố định khiến hành vi của pipeline không bị thay đổi lặng lẽ bởi một bản phát hành mới của action phía nhà cung cấp.",
+      "options": [
+        "Để action tải nhanh hơn",
+        "Để hành vi pipeline không bị thay đổi lặng lẽ khi nhà cung cấp phát hành bản mới",
+        "Vì GitHub bắt buộc về mặt cú pháp",
+        "Để log hiển thị đẹp hơn"
+      ],
+      "question": "Vì sao phải ghim phiên bản cụ thể cho action bên thứ ba?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Digest là định danh theo nội dung, bất biến. Tag có thể bị trỏ lại; rollback và triển khai an toàn phải bám vào digest của đúng image đã kiểm chứng.",
+      "options": [
+        "Tên ngắn gọn",
+        "Định danh theo nội dung, bất biến, trỏ tới đúng image đã build và kiểm chứng",
+        "Số thứ tự của lần chạy workflow",
+        "Tên của người bấm nút triển khai"
+      ],
+      "question": "Digest của image có giá trị gì đối với triển khai và rollback?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Theo nguyên tắc đặc quyền tối thiểu, token chỉ có các quyền thật sự cần cho công việc của workflow — ví dụ đọc mã nguồn và ghi package khi đẩy image.",
+      "options": [
+        "Đúng — chỉ cấp đúng các quyền workflow cần, ví dụ đọc mã nguồn và ghi package khi cần đẩy image",
+        "Sai — nên cấp toàn quyền để tránh lỗi thiếu quyền",
+        "Đúng — nhưng quyền mặc định vốn đã tối thiểu sẵn",
+        "Sai — token tự động không có khái niệm quyền"
+      ],
+      "question": "Khẳng định 'token tự động của workflow nên được cấp quyền tối thiểu' đúng hay sai?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Khóa theo nội dung của các file POM đảm bảo cache chỉ được tái dùng khi tập dependency không đổi; dependency đổi thì cache tự vô hiệu.",
+      "options": [
+        "Ngày chạy pipeline",
+        "Nội dung của các file pom.xml để cache vô hiệu đúng khi dependency thay đổi",
+        "Tên của developer",
+        "Số lượng module trong dự án"
+      ],
+      "question": "Cache của Maven trong pipeline nên khóa theo điều gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Tag theo commit truy vết được image về đúng mã nguồn đã kiểm thử; tag phiên bản phục vụ cho phát hành chính thức. Cả hai cùng trỏ một digest trong một lần phát hành đúng chuẩn.",
+      "options": [
+        "Chỉ dùng một nhãn latest cho mọi lần build",
+        "Đặt tên theo cảm hứng của người release",
+        "Tag theo mã commit cho mọi lần build, cộng tag phiên bản khi phát hành, và ghi lại digest",
+        "Đặt tên theo ngày tháng là đủ"
+      ],
+      "question": "Chiến lược tag image đúng chuẩn cho Nova Loyalty là gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Job build và push cần điều kiện để phân biệt sự kiện push lên nhánh chính (được đẩy image phát hành) với pull request (chỉ kiểm chứng, không đẩy bản phát hành).",
+      "options": [
+        "Vì pull request không chạy được job nào cả",
+        "Để pull request chỉ kiểm chứng mà không đẩy image phát hành lên registry",
+        "Để tiết kiệm dung lượng của runner",
+        "Vì Docker không build được trong pull request"
+      ],
+      "question": "Vì sao job đẩy image cần điều kiện phân biệt push và pull request?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Một lệnh Maven tới pha verify đã bao phủ compile, test, package và các kiểm tra ở verify — đúng như phân tích chồng pha ở bài Maven lifecycle.",
+      "options": [
+        "mvn -B test package verify deploy",
+        "mvn -B clean install -DskipTests",
+        "mvn -B verify",
+        "Không có lệnh nào, phải gọi từng pha riêng"
+      ],
+      "question": "Lệnh Maven nào trong pipeline bao phủ cả biên dịch, unit test và kiểm chứng?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Theo tài liệu chính thức, thư mục .github/workflows trong repository là nơi chứa các file workflow YAML của GitHub Actions.",
+      "options": [
+        "Thư mục gốc của repository với tên bất kỳ",
+        "Thư mục dành riêng cho workflow trong cây thư mục của GitHub trong repository",
+        "Trong thư mục target sau khi build",
+        "Trong phần cài đặt của organization, không nằm trong repo"
+      ],
+      "question": "File workflow của GitHub Actions nằm ở đâu trong repository?"
+    }
+  ]
+}

@@ -1,0 +1,185 @@
+---
+title: "Cờ JVM trong container — RAM, entropy và timezone"
+module: 11
+level: "Middle"
+duration: 45
+order: 2
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Phân biệt được `JAVA_TOOL_OPTIONS` và `JDK_JAVA_OPTIONS` về phạm vi áp dụng và thứ tự ưu tiên khi truyền cờ cho JVM.
+- Cấu hình được heap theo tỷ lệ RAM của container bằng `MaxRAMPercentage` thay vì ghim cứng giá trị tuyệt đối, và giải thích được rủi ro OOM kill khi bỏ qua giới hạn của container.
+- Xử lý đúng ba vấn đề vận hành kinh điển trong container: nguồn entropy, timezone và bộ nhớ ngoài heap.
+
+## Vì sao cần biết
+
+Các service của Nova Loyalty chạy trong container với giới hạn bộ nhớ do Kubernetes cấp phát. Giai đoạn đầu, team ghim cứng tham số heap theo thói quen từ thời chạy máy ảo: container được cấp ít RAM hơn con số đã ghim, và kết quả là pod bị hệ thống giết thẳng (OOMKilled) giữa giờ cao điểm đổi quà mà không để lại một dòng log Java nào — vì tiến trình bị giết từ bên ngoài chứ không phải lỗi hết heap của JVM. Hiểu cách JVM nhận biết giới hạn của container và cách truyền cờ đúng chuẩn là điều kiện để Nova Loyalty chạy ổn định trên Kubernetes, đồng thời tránh các sự cố "ma" như khởi động chậm vì thiếu entropy hay sai lệch thời gian nghiệp vụ vì timezone mặc định.
+
+## Nội dung chính
+
+### JVM có nhận biết container hay không
+
+Từ các bản JDK hiện đại, JVM đã có khả năng nhận biết mình đang chạy trong container và đọc giới hạn CPU/bộ nhớ từ cơ chế của hệ điều hành. Trên Java 21, hành vi này là mặc định. Hệ quả: nếu bạn không đặt heap tường minh, JVM sẽ suy ra kích thước heap tối đa từ giới hạn RAM của container chứ không phải từ RAM của máy chủ vật lý. Đây là thay đổi nền tảng so với thời kỳ JVM đọc thẳng thông số máy chủ và tự "chiếm" heap vượt xa giới hạn container.
+
+Tuy vậy, "JVM tự suy ra" không có nghĩa là "không cần cấu hình": tỷ lệ mặc định dành cho heap có thể không phù hợp với ứng dụng dùng nhiều bộ nhớ ngoài heap như các pool kết nối của 5 datasource HikariCP tại Nova Loyalty, bộ đệm của Kafka client hay vùng nhớ của các thư viện native.
+
+### MaxRAMPercentage thay cho giá trị tuyệt đối
+
+`MaxRAMPercentage` đặt heap tối đa theo tỷ lệ phần trăm của RAM container. Ưu điểm quyết định: cùng một cấu hình dùng được cho nhiều môi trường có limit khác nhau (dev nhỏ, production lớn) mà không phải sửa Dockerfile hay manifest cho từng nơi. Ngược lại, ghim cứng `-Xmx` bằng số tuyệt đối sẽ vỡ ngay khi limit thay đổi mà không ai nhớ sửa lại cờ.
+
+Phần RAM còn lại sau heap không phải "dư thừa": nó nuôi metaspace, thread stack, bộ đệm trực tiếp, code cache và chính các thư viện native. Chọn tỷ lệ là bài toán cân bằng cần dữ kiện đo đạc từ ứng dụng thật của bạn; đừng sao chép tỷ lệ từ một bài blog không rõ ngữ cảnh.
+
+### JAVA_TOOL_OPTIONS và JDK_JAVA_OPTIONS
+
+Có hai biến môi trường chuẩn để truyền cờ cho JVM mà không sửa lệnh khởi chạy:
+
+- `JAVA_TOOL_OPTIONS`: được mọi tiến trình Java đọc khi khởi động, áp dụng rộng kể cả các công cụ chạy bằng Java trong cùng container; JVM in một dòng thông báo ra đầu ra chuẩn khi biến này được áp dụng.
+- `JDK_JAVA_OPTIONS`: chỉ áp dụng cho lệnh `java` launcher, phạm vi hẹp và sạch hơn cho mục đích chạy ứng dụng.
+
+Thứ tự và mức ghi đè giữa biến môi trường, file cấu hình và đối số dòng lệnh cần được kiểm chứng trên đúng bản JDK đang dùng; nguyên tắc chung là đối số tường minh trên dòng lệnh có tiếng nói cuối cùng.
+
+> [!WARNING] Cần verify với docs version Java 21: chi tiết về thứ tự ưu tiên chính xác giữa `JDK_JAVA_OPTIONS`, đối số dòng lệnh và `JAVA_TOOL_OPTIONS`, cùng dòng thông báo mà JVM in ra, hãy đối chiếu với tài liệu chính thức của bản JDK đang chạy trước khi chuẩn hóa cho toàn team.
+
+<Mermaid chart={`flowchart LR
+  K8s[Kubernetes limit<br/>memory của container] --> JVM[JVM đọc giới hạn container]
+  Env[JAVA_TOOL_OPTIONS<br/>JDK_JAVA_OPTIONS] --> JVM
+  JVM --> Heap[Heap = tỷ lệ của RAM container<br/>MaxRAMPercentage]
+  JVM --> NonHeap[Ngoài heap<br/>metaspace / stack / direct buffer]
+  Heap --> App[Nova Loyalty service]
+  NonHeap --> App`} label="JVM trên Java 21 đọc giới hạn của container và chia RAM giữa heap theo MaxRAMPercentage với phần ngoài heap." />
+
+### Entropy và thời gian khởi động
+
+Một số thao tác mật mã và sinh số ngẫu nhiên an toàn phụ thuộc vào nguồn entropy của hệ điều hành. Trong container tối thiểu, nguồn entropy có thể ít hơn kỳ vọng, khiến lần khởi động đầu hoặc các thao tác tạo khóa bị chặn chờ. Dấu hiệu nhận biết: ứng dụng treo bất thường ở giai đoạn khởi tạo liên quan tới bảo mật mà không có log lỗi. Biện pháp xử lý thuộc tầng cấu hình nguồn ngẫu nhiên của JDK và hệ điều hành — hãy xác minh theo tài liệu của bản JDK thay vì áp dụng mẹo truyền miệng.
+
+### Timezone trong container
+
+Container tối thiểu thường mặc định timezone là UTC, trong khi nghiệp vụ Nova Loyalty tính điểm hết hạn, khung giờ khuyến mãi và báo cáo theo giờ Asia/Saigon. Sai lệch timezone không gây crash — nó gây sai dữ liệu lặng lẽ, loại lỗi tốn kém nhất. Chuẩn hóa bằng cách đặt timezone tường minh cho JVM và nhất quán với cách lưu trữ thời gian ở database: lưu trữ theo chuẩn trung lập và chỉ chuyển đổi ở tầng hiển thị/tính toán nghiệp vụ khi có chủ đích rõ ràng.
+
+### CPU trong container và số luồng của ứng dụng
+
+Nhận biết container của JVM không chỉ áp dụng cho bộ nhớ: giới hạn CPU của container cũng ảnh hưởng tới
+cách JVM suy ra số bộ xử lý khả dụng, và từ đó ảnh hưởng tới kích thước mặc định của các nhóm luồng dùng chung
+như nhóm luồng song song của framework và các thư viện chạy song song trong ứng dụng.
+Khi một container bị giới hạn ở một phần nhỏ của một lõi CPU nhưng các nhóm luồng vẫn được tính theo số lõi
+của máy chủ vật lý, hệ quả là tranh chấp luồng và độ trễ tăng vọt dù mức sử dụng CPU hiển thị vẫn chưa cao.
+Vì vậy khi điều tra một service Java chạy chậm bất thường trong container, hãy kiểm tra cả cặp giới hạn
+CPU và bộ nhớ đã được cấp, đừng chỉ nhìn vào heap.
+
+## Code
+
+Truyền cờ JVM qua biến môi trường trong Dockerfile, heap theo tỷ lệ RAM container:
+
+```dockerfile filename=Dockerfile.jvm-flags
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+
+# Heap chiếm tối đa 70% RAM của container, chừa phần còn lại cho ngoài heap
+ENV JDK_JAVA_OPTIONS="-XX:MaxRAMPercentage=70.0 -Duser.timezone=Asia/Saigon"
+
+COPY --from=builder /workspace/extracted/dependencies/ ./
+COPY --from=builder /workspace/extracted/spring-boot-loader/ ./
+COPY --from=builder /workspace/extracted/snapshot-dependencies/ ./
+COPY --from=builder /workspace/extracted/application/ ./
+
+USER nova
+EXPOSE 8080
+ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]
+```
+
+Khai báo giới hạn tài nguyên phía Kubernetes để JVM có "trần" rõ ràng mà suy ra heap (chi tiết manifest ở bài tiếp theo):
+
+```yaml filename=deployment-resources.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nova-points
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nova-points
+  template:
+    metadata:
+      labels:
+        app: nova-points
+    spec:
+      containers:
+        - name: points
+          image: registry.example.invalid/nova/points:1.4.2
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+          env:
+            - name: JDK_JAVA_OPTIONS
+              value: "-XX:MaxRAMPercentage=70.0 -Duser.timezone=Asia/Saigon"
+```
+
+Ghi đè cờ cho một lần chạy kiểm chứng ở môi trường dev bằng đối số dòng lệnh tường minh:
+
+```bash filename=run-local-check.sh
+# Chạy thử với heap tỷ lệ khác để quan sát hành vi, không sửa Dockerfile
+java -XX:MaxRAMPercentage=50.0 -Duser.timezone=Asia/Saigon \
+  -jar target/nova-points-1.0.0.jar
+
+# In các cờ hiệu lực mà JVM đang dùng để đối chiếu khi điều tra sự cố
+java -XX:+PrintFlagsFinal -version
+```
+
+## Sai lầm thường gặp
+
+### 1. Ghim cứng heap vượt quá giới hạn bộ nhớ của container
+
+- **Triệu chứng:** Pod bị OOMKilled lặp lại, trạng thái container cho thấy bị giết từ bên ngoài, trong log Java không có lỗi hết bộ nhớ của JVM.
+- **Nguyên nhân:** Heap tuyệt đối cộng với bộ nhớ ngoài heap vượt quá limit của container; nhân hệ điều hành giết tiến trình dùng vượt định mức trước khi JVM kịp báo lỗi của mình.
+- **Fix:** Dùng `MaxRAMPercentage` theo tỷ lệ của limit, kiểm chứng tổng nhu cầu gồm cả ngoài heap, và theo dõi sự kiện OOMKilled như một tín hiệu vận hành riêng.
+
+### 2. Đặt cùng một cờ ở nhiều nơi rồi không biết giá trị nào thắng
+
+- **Triệu chứng:** Đổi cờ trong Dockerfile không có tác dụng vì một biến môi trường ở manifest Kubernetes hoặc đối số dòng lệnh đã ghi đè lặng lẽ.
+- **Nguyên nhân:** Truyền cùng một tham số qua nhiều kênh (`JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS`, dòng lệnh, file cấu hình) mà không có quy ước một nguồn sự thật.
+- **Fix:** Chuẩn hóa một kênh chính cho cờ JVM của ứng dụng, ghi lại trong tài liệu vận hành, và kiểm chứng cờ hiệu lực bằng công cụ in flags của JVM khi điều tra.
+
+### 3. Để timezone mặc định của container chi phối nghiệp vụ
+
+- **Triệu chứng:** Điểm hết hạn lệch một ngày, báo cáo tổng hợp lệch khung giờ so với đối chiếu thủ công, nhưng không có bất kỳ lỗi nào trong log.
+- **Nguyên nhân:** Container mặc định UTC trong khi nghiệp vụ Nova Loyalty tính theo giờ Asia/Saigon; không có điểm nào trong hệ thống khai báo timezone một cách tường minh và nhất quán.
+- **Fix:** Đặt timezone tường minh cho JVM, quy ước rõ định dạng lưu trữ ở database và tầng nào chịu trách nhiệm chuyển đổi khi hiển thị/tính toán.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Tính toán:** Một pod Nova Loyalty được cấp limit 1Gi RAM. Với `MaxRAMPercentage` bằng 70, heap tối đa là bao nhiêu và phần còn lại phải nuôi những thành phần nào? Nêu một dấu hiệu cho thấy tỷ lệ 70 là quá cao với ứng dụng này.
+2. **Đọc cấu hình trả lời:** Trong `deployment-resources.yaml` ở mục Code, nếu team tăng limit lên 2Gi mà không sửa biến môi trường thì heap thay đổi thế nào? Điều này minh họa ưu điểm gì của cách đặt theo tỷ lệ?
+3. **Điều tra sự cố:** Pod bị OOMKilled nhưng log ứng dụng sạch. Viết quy trình điều tra 4 bước phân biệt "JVM hết heap" với "container bị giết vì vượt limit", ghi rõ bằng chứng cần thu ở mỗi bước.
+4. **Chuẩn hóa:** Soạn bảng quy ước truyền cờ JVM cho team Nova Loyalty: kênh nào dùng cho cờ runtime, kênh nào bị cấm dùng trùng, và cách kiểm chứng cờ hiệu lực sau mỗi lần thay đổi.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- OpenJDK — JDK 21 Documentation: https://openjdk.org/projects/jdk/21/
+- Dev.java — Java Platform Documentation: https://dev.java/learn/
+- Kubernetes — Resource Management for Pods and Containers: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+
+## Đọc thêm
+
+Không có.

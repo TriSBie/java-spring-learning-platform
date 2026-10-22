@@ -1,0 +1,186 @@
+---
+title: "OpenTelemetry Tracing và Lan Truyền Ngữ Cảnh qua Kafka"
+module: 9
+level: "Senior"
+duration: 60
+order: 3
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Micrometer 1.13.x", "OpenTelemetry Java 1.4x", "Kafka 3.8"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Giải thích được cấu trúc trace, span và quan hệ cha con, đọc được một waterfall để tìm span chiếm thời gian tới hạn.
+- Cài đặt được lan truyền ngữ cảnh truy vết theo chuẩn W3C qua header của Kafka message giữa producer Outbox relay và CRM consumer của Nova Loyalty.
+- Tương quan được log, metric và trace bằng cùng một định danh truy vết để điều tra một giao dịch điểm xuyên gateway, service và Kafka.
+
+## Vì sao cần biết
+
+Một giao dịch điểm tại Nova Loyalty đi qua gateway `/v4/{gs,os,ws}/*`, vào points service, ghi Outbox, qua Debezium vào Kafka rồi tới CRM consumer — tổng hành trình chạm 4 ranh giới tiến trình. Khi CRM báo một giao dịch chậm hoặc mất, logs của từng service đều nói phần của mình nhưng không ai nối được chúng thành một câu chuyện. Tracing phân tán của OpenTelemetry gắn cho hành trình đó một định danh chung và các span có quan hệ cha con; điểm khó nhất và đáng học nhất là lan truyền ngữ cảnh qua Kafka, nơi request thread truyền thống kết thúc và ngữ cảnh phải đi nhờ header của message.
+
+## Nội dung chính
+
+### Trace, span và đường tới hạn
+
+Một trace là toàn bộ hành trình của một yêu cầu xuyên nhiều tiến trình.
+Mỗi span là một đoạn công việc có tên, thời điểm bắt đầu, thời lượng và thuộc tính.
+Span con nằm trong span cha, tạo thành cây thời gian khi vẽ dạng waterfall.
+Đường tới hạn là chuỗi span quyết định tổng thời lượng; tối ưu ngoài đường này không cải thiện trải nghiệm.
+Thuộc tính của span nên là dữ kiện có cardinality kiểm soát được, ví dụ loại giao dịch và datasource, không phải mã giao dịch.
+
+### Ngữ cảnh W3C và cơ chế lan truyền
+
+Chuẩn W3C định nghĩa header mang định danh trace và span cha cùng trạng thái liên quan.
+Phía gửi inject ngữ cảnh hiện tại vào carrier, phía nhận extract để tạo span con đúng cây.
+Với HTTP, carrier là header của request; với Kafka, carrier là header của record.
+Nếu một mắt xích bỏ qua việc inject hoặc extract, trace bị đứt thành hai hành trình rời nhau đúng tại biên đó.
+Việc đứt trace tại biên bất đồng bộ là lỗi phổ biến nhất khi tracing các hệ dùng hàng đợi.
+
+### Lan truyền qua Kafka tại Nova
+
+Producer ghi ngữ cảnh hiện tại vào header của record trước khi gửi.
+Consumer extract ngữ cảnh từ header của record nhận được và mở span tiêu thụ con của span sản xuất.
+Với đường Outbox, ngữ cảnh cần được lưu kèm sự kiện hoặc tái tạo có kỷ luật, vì Debezium là mắt xích chuyển tiếp không chạy code ứng dụng.
+Span của consumer phải ghi rõ tên topic, consumer group và khóa idempotency đã xử lý để điều tra trùng lặp.
+Thời gian chờ trong hàng đợi là một phần của span liên kết: đừng để nó biến mất khỏi bức tranh độ trễ đầu-cuối.
+
+<Mermaid chart={`sequenceDiagram
+  participant GW as Gateway
+  participant PS as PointsService
+  participant K as Kafka
+  participant CC as CRM Consumer
+  GW->>PS: HTTP kem header trace W3C
+  PS->>PS: span changePoints
+  PS->>K: record kem header trace duoc inject
+  K->>CC: deliver record
+  CC->>CC: extract va mo span consume con`} label="Lan truyền ngữ cảnh truy vết từ HTTP sang Kafka tại Nova Loyalty" />
+
+### Tương quan ba trụ cột bằng một định danh
+
+Log có cấu trúc nên mang cùng định danh truy vết với span đang hoạt động.
+Metric cho biết cửa sổ thời gian và phạm vi bị ảnh hưởng, trace chỉ đúng hành trình mẫu cần mổ xẻ.
+Từ một cảnh báo độ trễ, ca trực đi tới trace mẫu, từ span chậm đi tới log cùng định danh, đó là vòng điều tra khép kín.
+Tỉ lệ lấy mẫu trace phải được quyết định có chủ đích: lấy mẫu theo phần đuôi giúp giữ lại các hành trình chậm bất thường.
+
+## Code
+
+Dependencies trong `pom.xml`: thư viện OpenTelemetry cho Spring Boot và cho Kafka theo phiên bản ghim của nền tảng. Package mẫu là `com.nova.loyalty.trace`. Cần verify tên artifact chính xác với tài liệu của đúng phiên bản đang dùng trước khi áp dụng.
+
+```java filename=KafkaTracePropagation.java
+package com.nova.loyalty.trace;
+
+import io.opentelemetry.api.GlobalOpenTelemetry;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.Tracer;
+import io.opentelemetry.context.Context;
+import io.opentelemetry.context.Scope;
+import io.opentelemetry.context.propagation.TextMapGetter;
+import io.opentelemetry.context.propagation.TextMapSetter;
+import java.nio.charset.StandardCharsets;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.header.Header;
+import org.apache.kafka.common.header.internals.RecordHeader;
+
+public class KafkaTracePropagation {
+
+    private static final Tracer TRACER =
+            GlobalOpenTelemetry.getTracer("com.nova.loyalty.trace");
+
+    private static final TextMapSetter<ProducerRecord<String, String>> SETTER =
+            (carrier, key, value) -> carrier.headers().add(
+                    new RecordHeader(key, value.getBytes(StandardCharsets.UTF_8)));
+
+    private static final TextMapGetter<ConsumerRecord<String, String>> GETTER =
+            new TextMapGetter<>() {
+                @Override
+                public Iterable<String> keys(ConsumerRecord<String, String> carrier) {
+                    return () -> java.util.stream.StreamSupport
+                            .stream(carrier.headers().spliterator(), false)
+                            .map(Header::key)
+                            .iterator();
+                }
+
+                @Override
+                public String get(ConsumerRecord<String, String> carrier, String key) {
+                    Header header = carrier.headers().lastHeader(key);
+                    return header == null ? null
+                            : new String(header.value(), StandardCharsets.UTF_8);
+                }
+            };
+
+    public ProducerRecord<String, String> injectContext(
+            ProducerRecord<String, String> record) {
+        Context current = Context.current();
+        GlobalOpenTelemetry.getPropagators().getTextMapPropagator()
+                .inject(current, record, SETTER);
+        return record;
+    }
+
+    public void consumeWithContext(ConsumerRecord<String, String> record, Runnable handler) {
+        Context extracted = GlobalOpenTelemetry.getPropagators().getTextMapPropagator()
+                .extract(Context.current(), record, GETTER);
+        Span span = TRACER.spanBuilder("crm.consume")
+                .setParent(extracted)
+                .setAttribute("messaging.system", "kafka")
+                .setAttribute("messaging.destination.name", record.topic())
+                .startSpan();
+        try (Scope scope = span.makeCurrent()) {
+            handler.run();
+        } finally {
+            span.end();
+        }
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Quên inject ngữ cảnh ở một producer trung gian
+
+- **Triệu chứng:** Trace bị đứt đúng tại biên Kafka, phía consumer bắt đầu một trace mới không liên quan.
+- **Nguyên nhân:** Mắt xích chuyển tiếp tự tạo record mới từ dữ liệu mà không mang theo header ngữ cảnh đã nhận.
+- **Fix:** Mọi điểm tạo record phải inject ngữ cảnh hiện tại; viết test hợp đồng kiểm tra header tồn tại trên record sinh ra.
+
+### 2. Đưa mã giao dịch vào thuộc tính span rồi dùng làm chiều truy vấn chính
+
+- **Triệu chứng:** Hệ thống truy vết phình dữ liệu và truy vấn chậm, đội ngũ bắt đầu tắt tracing trên production.
+- **Nguyên nhân:** Thuộc tính cardinality cao bị dùng như chỉ mục chính thay vì chỉ là dữ kiện tra cứu điểm.
+- **Fix:** Giữ thuộc tính span ở cardinality kiểm soát, dùng định danh truy vết để nhảy giữa log và trace thay vì truy vấn theo mã giao dịch.
+
+### 3. Lấy mẫu đồng đều với tỉ lệ quá thấp
+
+- **Triệu chứng:** Các hành trình chậm bất thường gần như không bao giờ xuất hiện trong dữ liệu truy vết.
+- **Nguyên nhân:** Lấy mẫu ngẫu nhiên đều ưu tiên số đông bình thường và bỏ qua phần đuôi quý giá cho điều tra.
+- **Fix:** Áp dụng lấy mẫu ưu tiên phần đuôi hoặc tăng tỉ lệ cho route tới hạn, kèm ngân sách lưu trữ rõ ràng.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Vẽ cây span:** Vẽ cây span đầy đủ cho giao dịch đổi quà đi qua gateway, service, Outbox, Kafka và CRM consumer; đánh dấu đường tới hạn giả định.
+2. **Đọc code:** Trong code mẫu, điều gì xảy ra với cây trace nếu consumer bỏ qua bước extract? Viết kịch bản kiểm chứng tự động cho hành vi đó.
+3. **Thiết kế:** Đề xuất cách mang ngữ cảnh qua đường Outbox khi Debezium là mắt xích chuyển tiếp không chạy code ứng dụng; nêu đánh đổi của từng phương án.
+4. **Phản biện:** Vì sao không nên bật lấy mẫu toàn bộ trace trên mọi route ở production lâu dài? Nêu chi phí và phương án thay thế.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- OpenTelemetry — Documentation và Tracing Concepts: https://opentelemetry.io/docs/
+- IETF — Trace Context chuẩn W3C qua RFC tham chiếu: https://datatracker.ietf.org/
+- Kafka — Documentation: https://kafka.apache.org/documentation/
+
+## Đọc thêm
+
+Không có.

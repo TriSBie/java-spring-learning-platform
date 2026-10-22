@@ -1,0 +1,187 @@
+---
+title: "Ba Trụ Cột Observability, Micrometer và Prometheus"
+module: 9
+level: "Middle"
+duration: 50
+order: 1
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Micrometer 1.13.x", "OpenTelemetry Java 1.4x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Kể và phân biệt được ba trụ cột metrics, logs, traces theo câu hỏi mà mỗi trụ cột trả lời tốt nhất.
+- Tạo được ít nhất một counter, một timer và một gauge bằng Micrometer trong service Nova Loyalty, đặt tên và tag đúng quy ước không bùng nổ cardinality.
+- Cấu hình được endpoint metrics của Actuator và job scrape của Prometheus trỏ đúng vào service, kiểm chứng được dữ liệu thật sự chảy.
+
+## Vì sao cần biết
+
+Nova Loyalty vận hành nhiều service qua gateway `/v4/{gs,os,ws}/*`, 5 datasource và một pipeline Outbox tới CRM. Khi sự cố xảy ra, câu hỏi đầu tiên luôn là hệ thống có đang khỏe không, tiếp theo là lỗi nằm ở đâu. Ba trụ cột observability trả lời ba lớp câu hỏi đó: metrics cho bức tranh tổng hợp theo thời gian, logs cho chi tiết từng sự kiện, traces cho hành trình của một request qua nhiều service. Micrometer là lớp trừu tượng đo lường chuẩn của Spring Boot 3.3 tại Nova, còn Prometheus là nơi lưu trữ và truy vấn metrics để vẽ dashboard và đặt cảnh báo ở các bài sau.
+
+## Nội dung chính
+
+### Ba trụ cột trả lời ba câu hỏi khác nhau
+
+Metrics là số đo tổng hợp theo thời gian: tỉ lệ lỗi, độ trễ, số connection đang dùng.
+Metrics rẻ để lưu lâu dài và là thứ duy nhất nên dùng để đánh thức con người qua cảnh báo.
+Logs là bản ghi chi tiết của từng sự kiện, giàu ngữ cảnh nhưng đắt và khó tổng hợp.
+Traces nối các span của một request xuyên service thành một hành trình có thứ tự nhân quả.
+Dùng sai trụ cột cho sai câu hỏi là lãng phí kinh điển: đừng tính tỉ lệ lỗi bằng cách đếm log.
+
+### Micrometer: đo một lần, xuất nhiều nơi
+
+Micrometer cung cấp API đo lường độc lập với backend lưu trữ.
+Counter chỉ tăng, phù hợp đếm số giao dịch điểm thành công và thất bại.
+Timer đo cả số lần và thời gian, cho phân vị độ trễ của endpoint.
+Gauge phản ánh giá trị tức thời như số connection đang hoạt động của một pool.
+Meter registry của Spring Boot tự gắn các meter mặc định cho JVM, HTTP server và HikariCP khi Actuator có mặt.
+
+### Quy ước tên và tag: kỷ luật cardinality
+
+Tên meter nên ổn định, dùng định dạng phân cấp rõ nghĩa theo miền nghiệp vụ.
+Tag dùng để cắt lát số liệu theo chiều như route, kết quả và datasource.
+Mỗi giá trị tag khác nhau sinh một chuỗi thời gian riêng trong Prometheus.
+Vì vậy tuyệt đối không đưa mã thành viên hay mã giao dịch vào tag: số chuỗi thời gian sẽ bùng nổ và làm sập chính hệ thống giám sát.
+Chiều có cardinality thấp và hữu hạn mới đủ điều kiện làm tag.
+
+<Mermaid chart={`flowchart LR
+  App[Service Nova + Micrometer] --> Act[Endpoint metrics Actuator]
+  Act -->|Prometheus scrape| Prom[(Prometheus)]
+  Prom --> Graf[Grafana - Module 09 bài 2]
+  Prom --> Alert[Alert rules - Module 09 bài 5]`} label="Đường đi của metrics: từ Micrometer trong service tới Prometheus và các tầng tiêu thụ" />
+
+### Scrape: Prometheus chủ động kéo số liệu
+
+Prometheus kéo metrics theo chu kỳ từ endpoint đã cấu hình thay vì chờ ứng dụng đẩy lên.
+Khoảng thời gian kéo quyết định độ phân giải của số liệu và chi phí lưu trữ.
+Endpoint metrics phải được bảo vệ như mọi endpoint quản trị khác và không lộ ra ngoài gateway công cộng.
+Kiểm chứng sau cấu hình gồm ba việc: endpoint trả dữ liệu, Prometheus nhận diện target ở trạng thái hoạt động, và truy vấn đơn giản trả về chuỗi số thật.
+
+## Code
+
+Dependencies trong `pom.xml`: `spring-boot-starter-actuator` và registry Prometheus của Micrometer. Package mẫu là `com.nova.loyalty.observe`.
+
+```yaml filename=application.yml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+  metrics:
+    tags:
+      application: nova-points-api
+```
+
+```yaml filename=prometheus.yml
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: "nova-points-api"
+    metrics_path: "/actuator/prometheus"
+    static_configs:
+      - targets: ["points-api:8080"]
+        labels:
+          service: "points-api"
+  - job_name: "nova-crm-consumer"
+    metrics_path: "/actuator/prometheus"
+    static_configs:
+      - targets: ["crm-consumer:8080"]
+        labels:
+          service: "crm-consumer"
+```
+
+```java filename=PointsMetrics.java
+package com.nova.loyalty.observe;
+
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import java.util.concurrent.TimeUnit;
+import org.springframework.stereotype.Component;
+
+@Component
+public class PointsMetrics {
+
+    private final Counter successCounter;
+    private final Counter failureCounter;
+    private final Timer changeTimer;
+
+    public PointsMetrics(MeterRegistry registry) {
+        this.successCounter = Counter.builder("nova.points.changes")
+                .tag("result", "success")
+                .description("So giao dich diem thanh cong")
+                .register(registry);
+        this.failureCounter = Counter.builder("nova.points.changes")
+                .tag("result", "failure")
+                .description("So giao dich diem that bai")
+                .register(registry);
+        this.changeTimer = Timer.builder("nova.points.change.duration")
+                .description("Thoi gian xu ly thay doi diem")
+                .publishPercentiles(0.5, 0.95, 0.99)
+                .register(registry);
+    }
+
+    public void recordChange(boolean success, long elapsedMillis) {
+        if (success) {
+            successCounter.increment();
+        } else {
+            failureCounter.increment();
+        }
+        changeTimer.record(elapsedMillis, TimeUnit.MILLISECONDS);
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Đưa mã thành viên vào tag của meter
+
+- **Triệu chứng:** Prometheus phình bộ nhớ, truy vấn chậm dần rồi chính hệ thống giám sát sập trong giờ cao điểm.
+- **Nguyên nhân:** Mỗi giá trị tag sinh một chuỗi thời gian riêng; mã thành viên có cardinality gần như vô hạn.
+- **Fix:** Chỉ dùng tag có tập giá trị hữu hạn và nhỏ; nhu cầu theo từng thành viên thuộc về log và trace, không thuộc metrics.
+
+### 2. Chỉ expose endpoint metrics nhưng quên kiểm chứng phía Prometheus
+
+- **Triệu chứng:** Dashboard trống suốt nhiều tuần và team chỉ phát hiện khi sự cố thật xảy ra.
+- **Nguyên nhân:** Cấu hình ở ứng dụng xong nhưng job scrape sai đường dẫn hoặc sai cổng nên Prometheus không kéo được dữ liệu.
+- **Fix:** Kiểm chứng ba bước sau mọi thay đổi: endpoint trả dữ liệu, target ở trạng thái hoạt động, truy vấn mẫu trả chuỗi số thật.
+
+### 3. Đo độ trễ chỉ bằng giá trị trung bình
+
+- **Triệu chứng:** Báo cáo luôn xanh trong khi nhóm khách ở phân vị cao chịu độ trễ rất tệ.
+- **Nguyên nhân:** Trung bình che giấu hoàn toàn phần đuôi phân phối nơi trải nghiệm xấu tập trung.
+- **Fix:** Dùng timer có phân vị và đặt ngưỡng theo phân vị cao cho các endpoint qua gateway.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Thiết kế:** Liệt kê 8 meter đầu tiên bạn sẽ đặt cho points API, gồm loại meter, tên, tag và câu hỏi nghiệp vụ mà nó trả lời.
+2. **Đọc cấu hình:** Kiểm tra file scrape mẫu và chỉ ra điều gì xảy ra nếu đường dẫn metrics sai một ký tự; viết cách bạn phát hiện lỗi đó trong 2 phút.
+3. **Viết tay:** Viết một gauge đo số thread đang chờ connection của pool `core` dùng dữ liệu từ bài pool sizing ở Module 08.
+4. **Phản biện:** Vì sao không nên tính tỉ lệ lỗi hệ thống bằng cách đếm dòng log lỗi? Nêu chi phí và độ tin cậy của hai cách.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Micrometer — Documentation và Concepts: https://micrometer.io/docs
+- Spring Boot — Actuator và Metrics: https://docs.spring.io/spring-boot/reference/actuator/metrics.html
+- Spring Boot — Actuator Endpoints: https://docs.spring.io/spring-boot/reference/actuator/endpoints.html
+
+## Đọc thêm
+
+Không có.

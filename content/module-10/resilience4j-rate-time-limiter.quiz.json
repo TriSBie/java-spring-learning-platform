@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Cấu hình được RateLimiter với limitForPeriod, limitRefreshPeriod và timeoutDuration đúng ngữ nghĩa.",
+    "Giải thích được vì sao @TimeLimiter cần kiểu trả về bất đồng bộ như CompletableFuture.",
+    "Nêu được cách đặt trần thời gian cho lời gọi đồng bộ bằng timeout của RestClient kết hợp ngưỡng chậm của breaker.",
+    "Mô tả được thứ tự aspect mặc định khi xếp chồng nhiều cơ chế chịu lỗi và hệ quả của từng vị trí.",
+    "Thiết kế được chính sách giới hạn tần suất theo định danh xác thực thay vì theo IP khi có SNAT.",
+    "Phân biệt được bảo vệ chiều vào cho API đối tác và giới hạn chiều ra tôn trọng hạn ngạch của phía bên kia."
+  ],
+  "quiz": [
+    {
+      "answerIndex": 3,
+      "explanation": "TimeLimiter của Resilience4j qua Spring AOP được thiết kế cho method trả về kiểu future. Method đồng bộ cần timeout ở tầng HTTP client và ngưỡng gọi chậm của breaker.",
+      "options": [
+        "Bất kỳ kiểu trả về nào",
+        "Chỉ kiểu void",
+        "Chỉ kiểu String",
+        "CompletableFuture hoặc kiểu bất đồng bộ tương đương"
+      ],
+      "question": "Với Spring AOP, @TimeLimiter yêu cầu kiểu trả về nào để có hiệu lực đúng?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "timeoutDuration bằng 0 nghĩa là không chờ slot: request vượt hạn ngạch bị từ chối ngay — lựa chọn phổ biến cho API đối tác cần phản hồi nhanh và rõ ràng.",
+      "options": [
+        "Chờ vô hạn tới khi có slot",
+        "Chờ đúng một chu kỳ làm mới",
+        "Nhân đôi hạn ngạch",
+        "Từ chối ngay lập tức"
+      ],
+      "question": "Trong RateLimiter, timeoutDuration bằng 0 có nghĩa là gì?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Sau SNAT, mọi đối tác dùng chung địa chỉ nguồn của thiết bị mạng. Giới hạn theo IP sẽ gộp tất cả vào một rổ; phải dùng API key/client id đã xác thực.",
+      "options": [
+        "IP bị SNAT gộp chung nên không còn định danh được từng đối tác; phải giới hạn theo API key hoặc client id",
+        "IP luôn là định danh tốt nhất",
+        "Vì đối tác không có địa chỉ IP",
+        "Vì rate limiter không hỗ trợ IP"
+      ],
+      "question": "Vì sao không nên giới hạn tần suất theo IP cho API đối tác của Nova Loyalty?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Thứ tự aspect quyết định ngữ nghĩa tổng hợp. Resilience4j khuyến nghị thứ tự bọc từ ngoài vào trong bắt đầu bằng Retry rồi CircuitBreaker, RateLimiter, TimeLimiter, Bulkhead — luôn đối chiếu với docs của bản 2.x đang dùng.",
+      "options": [
+        "Thứ tự hoàn toàn ngẫu nhiên mỗi lần khởi động",
+        "Có thứ tự mặc định được khuyến nghị và có thể tùy biến qua cấu hình aspect order",
+        "Annotation nào viết trước trong file nguồn thì chạy trước một cách đảm bảo",
+        "Chỉ một annotation được phép trên một method"
+      ],
+      "question": "Khi xếp chồng nhiều annotation chịu lỗi, điều nào đúng về thứ tự aspect?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Với đường đồng bộ, trần thời gian thật nằm ở connect/read timeout của HTTP client (RestClient) cộng với khả năng phát hiện gọi chậm của circuit breaker.",
+      "options": [
+        "Tăng heap cho JVM",
+        "Chỉ cần thêm @TimeLimiter là đủ",
+        "Đặt connect timeout và read timeout ở HTTP client, kết hợp ngưỡng gọi chậm của circuit breaker",
+        "Tắt rate limiter"
+      ],
+      "question": "Để đặt trần thời gian cho lời gọi HTTP đồng bộ, cách đúng là gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "limitRefreshPeriod 1s và limitForPeriod 50 cho phép trung bình 50 request/giây theo từng cửa sổ giây, bị từ chối ngay khi vượt nếu timeoutDuration bằng 0.",
+      "options": [
+        "50 request mỗi phút",
+        "50 request được phép trong mỗi chu kỳ làm mới dài 1 giây",
+        "Tối đa 50 thread đồng thời",
+        "50 lần retry cho mỗi request"
+      ],
+      "question": "Cấu hình limitForPeriod 50 với limitRefreshPeriod 1 giây có nghĩa là gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Hạn ngạch do phía bên kia áp lên là ràng buộc ngoài tầm kiểm soát: vượt nó có thể bị khóa tích hợp. Rate limiter chiều ra giúp Nova Loyalty tự giữ mình dưới trần đó.",
+      "options": [
+        "Để tăng tốc độ gọi ra tối đa",
+        "Rate limiter chiều ra không có tác dụng thực tế",
+        "Tôn trọng hạn ngạch mà CRM/đối tác áp lên Nova Loyalty, tránh bị khóa hoặc bị chặn ở phía bên kia",
+        "Thay thế cho xác thực"
+      ],
+      "question": "Rate limiter ở chiều gọi ra (outbound) bảo vệ điều gì?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "cancelRunningFuture cho phép yêu cầu hủy tác vụ nền khi quá thời hạn, thay vì để nó chạy tiếp và tiêu tốn tài nguyên vô ích sau khi kết quả đã không còn cần.",
+      "options": [
+        "Đúng — time limiter yêu cầu hủy future đang chạy khi hết timeout thay vì để nó chạy tiếp",
+        "Sai — future không bao giờ bị hủy",
+        "Đúng — nhưng chỉ áp dụng cho rate limiter",
+        "Sai — tham số này dùng để tăng timeout"
+      ],
+      "question": "Tham số cancelRunningFuture của TimeLimiter có vai trò gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "HTTP 429 là mã trạng thái chuẩn cho việc bị giới hạn tần suất — client đối tác cần nhận tín hiệu rõ ràng để backoff thay vì retry dội bão.",
+      "options": [
+        "200 kèm thân rỗng",
+        "429 Too Many Requests",
+        "404 Not Found",
+        "301 Redirect"
+      ],
+      "question": "Khi request bị rate limiter từ chối ở tầng API, mã trạng thái phù hợp nhất để trả về là gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Retry ở lớp ngoài cùng có thể nhân lượng request lên nhiều lần trước khi các lớp trong nhìn thấy, làm hạn ngạch thực tế bị vượt xa con số đã thiết kế nếu không tính toán tổng hợp.",
+      "options": [
+        "Retry luôn bị cấm khi có rate limiter",
+        "Retry không ảnh hưởng gì tới hạn ngạch",
+        "Retry có thể khuếch đại lượng request; phải tính tổng hợp với vị trí của retry trong chuỗi aspect",
+        "Chỉ cần tăng limitForPeriod là đủ trong mọi trường hợp"
+      ],
+      "question": "Tương tác nguy hiểm giữa Retry và RateLimiter khi xếp chồng là gì?"
+    }
+  ]
+}

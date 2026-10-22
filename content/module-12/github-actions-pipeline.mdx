@@ -1,0 +1,188 @@
+---
+title: "GitHub Actions pipeline — Test, build image, đẩy registry"
+module: 12
+level: "Middle"
+duration: 55
+order: 2
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Giải thích được các khái niệm workflow, job, step và runner trong GitHub Actions và cách các job phụ thuộc nhau.
+- Viết được một workflow hoàn chỉnh cho Nova Loyalty gồm kiểm thử bằng Maven, build container image và đẩy lên registry với tag có ý nghĩa.
+- Áp dụng được kỷ luật secret trong pipeline: không in secret ra log, cấp quyền tối thiểu cho token tự động và ghim version của các action bên thứ ba.
+
+## Vì sao cần biết
+
+Pipeline của Nova Loyalty là cánh cổng duy nhất đưa code từ máy của developer tới production trên Kubernetes: Flyway migration chạy trong pipeline (bài tiếp theo), image được build và đẩy lên registry trong pipeline, và việc rollback (bài cuối module) cũng dựa trên những tag image mà pipeline sinh ra. Một pipeline viết cẩu thả — bỏ qua test khi vội, nhúng credential cứng vào file workflow, hoặc tag image bằng một nhãn trôi nổi không truy vết được — sẽ phá vỡ mọi đảm bảo ở các khâu sau. Bài này dựng một workflow mẫu hoàn chỉnh, đúng chuẩn cho service Spring Boot của Nova Loyalty, để bạn có một điểm xuất phát an toàn thay vì lắp ghép từ các đoạn rời rạc trên mạng.
+
+## Nội dung chính
+
+### Mô hình workflow, job, step
+
+Một workflow là một file YAML nằm trong thư mục dành riêng cho workflow của repository, được kích hoạt bởi các sự kiện như push hoặc pull request. Workflow chứa một hoặc nhiều job; mỗi job chạy trên một runner (máy ảo do GitHub Actions cấp hoặc máy tự quản lý) và gồm nhiều step chạy tuần tự. Các job mặc định chạy song song; khi một job cần kết quả của job khác, bạn khai báo quan hệ phụ thuộc và job sau chỉ chạy khi job trước thành công.
+
+Điểm thiết kế quan trọng: tách job kiểm thử và job build/push image thành hai job có quan hệ phụ thuộc rõ ràng. Image chỉ được build và đẩy lên registry từ code đã qua kiểm thử, và khi test gãy, pipeline dừng sớm trước khi tốn thời gian build image.
+
+<Mermaid chart={`flowchart LR
+  Push[Push / Pull Request] --> Test[Job test<br/>Maven verify]
+  Test -->|chỉ khi đạt| Build[Job build<br/>build image]
+  Build --> PushReg[Đẩy lên registry<br/>tag theo commit và version]
+  PushReg --> Deploy[Giai đoạn triển khai<br/>ngoài workflow này]`} label="Pipeline của Nova Loyalty: job test là cổng bắt buộc trước job build image và đẩy registry." />
+
+### Ba giai đoạn của workflow mẫu
+
+Giai đoạn một kiểm thử: checkout mã nguồn, cài JDK 21 với cache cho Maven, rồi chạy Maven tới pha `verify` như bài trước đã phân tích — một lệnh duy nhất bao phủ cả biên dịch, unit test và các kiểm tra ở `verify`.
+
+Giai đoạn hai build image: sử dụng Dockerfile multi-stage của Module 11 để tạo image. Tag của image phải truy vết được về đúng commit đã qua kiểm thử, đồng thời mang nhãn phiên bản của bản phát hành khi release chính thức.
+
+Giai đoạn ba đẩy registry: đăng nhập registry bằng secret được cấp qua kho secret của repository hoặc organization, tuyệt đối không ghi credential vào file workflow. Sau khi đẩy, pipeline ghi lại digest của image — định danh bất biến trỏ tới đúng nội dung image — để giai đoạn triển khai và quy trình rollback dùng lại.
+
+### Secret, quyền và ghim phiên bản action
+
+Ba kỷ luật không thương lượng trong mọi pipeline:
+
+- Secret chỉ đến từ kho secret của GitHub và được truyền vào step qua cơ chế biến dành riêng cho secret; không bao giờ in giá trị secret ra log, kể cả khi debug.
+- Token tự động của workflow được cấp quyền tối thiểu theo nguyên tắc đặc quyền tối thiểu: chỉ đọc mã nguồn và ghi package khi thật sự cần, không mặc định cấp toàn quyền.
+- Các action bên thứ ba được ghim ở một phiên bản cụ thể đã kiểm chứng thay vì trỏ tới một nhánh trôi nổi, để một thay đổi ở phía nhà cung cấp action không lặng lẽ thay đổi hành vi pipeline của bạn qua đêm.
+
+> [!WARNING] Cần verify với docs version GitHub Actions hiện hành: cú pháp chính xác của các khóa quyền (permissions), tên và tham số của các action chính thức dùng để cài JDK, đăng nhập registry và build image có thể thay đổi giữa các phiên bản lớn của action; đối chiếu tài liệu chính thức của đúng phiên bản action được ghim trước khi áp dụng.
+
+### Cache và tốc độ pipeline
+
+Cache cho dependency của Maven giúp các lần chạy sau không phải tải lại toàn bộ thư viện — khác biệt lớn với dự án Spring Boot nhiều dependency. Cache phải được khóa theo nội dung của các file POM để khi dependency thay đổi, cache cũ không bị dùng sai. Tốc độ pipeline quan trọng vì nó quyết định hành vi của con người: pipeline càng chậm, team càng có động lực tìm cách đi đường tắt bỏ qua cổng kiểm thử.
+
+## Code
+
+Workflow hoàn chỉnh cho một service của Nova Loyalty (đặt trong thư mục workflow của repository):
+
+```yaml filename=ci.yml
+name: nova-points-ci
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Run tests and verify
+        run: mvn -B verify
+
+  build-and-push:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/example-org/nova-points:${{ github.sha }}
+            ghcr.io/example-org/nova-points:1.4.2
+```
+
+Đọc digest của image sau khi đẩy để bàn giao cho giai đoạn triển khai (minh họa bằng bước ghi lại thông tin bản build):
+
+```yaml filename=ci-digest-step.yml
+      - name: Record image reference
+        run: |
+          echo "Image pushed for commit ${{ github.sha }}"
+          echo "Release tag 1.4.2 must point to the same digest as the commit tag"
+```
+
+Kiểm chứng nhanh file workflow trước khi commit bằng cách rà soát thủ công các điểm kỷ luật:
+
+```bash filename=workflow-self-check.sh
+# Ba kiểm tra kỷ luật tối thiểu cho mọi workflow của Nova Loyalty
+# 1. Không có credential nào ghi cứng trong thư mục workflow
+grep -Rni "password:" .github/workflows || true
+
+# 2. Mọi action đều được ghim phiên bản cụ thể (có ký tự @version)
+grep -Rn "uses:" .github/workflows
+
+# 3. Workflow có khai báo khối quyền tối thiểu
+grep -Rn "permissions:" .github/workflows
+```
+
+## Sai lầm thường gặp
+
+### 1. Nhúng credential cứng hoặc in secret ra log khi debug
+
+- **Triệu chứng:** Token của registry xuất hiện trong log của một lần chạy pipeline, hoặc credential nằm thẳng trong file workflow đã commit.
+- **Nguyên nhân:** Xử lý pipeline như một script cá nhân thay vì một hệ thống được nhiều người đọc log; gỡ lỗi bằng cách in mọi biến ra ngoài.
+- **Fix:** Mọi secret đi qua kho secret của GitHub và cơ chế truyền secret chuyên dụng; cấm in secret dưới mọi hình thức và thu hồi ngay lập tức bất kỳ secret nào đã lộ trong log.
+
+### 2. Job build image không phụ thuộc vào job test
+
+- **Triệu chứng:** Image của code gãy test vẫn được đẩy lên registry với tag của bản phát hành, và ai đó vô tình triển khai nó.
+- **Nguyên nhân:** Các job mặc định chạy song song; nếu không khai báo quan hệ phụ thuộc, job build không hề chờ kết quả kiểm thử.
+- **Fix:** Khai báo rõ quan hệ phụ thuộc để job build và push chỉ chạy sau khi job test thành công; tách riêng điều kiện chỉ đẩy image khi sự kiện là push lên nhánh chính, không phải pull request.
+
+### 3. Tag image bằng nhãn trôi nổi duy nhất và không truy vết được
+
+- **Triệu chứng:** Khi cần rollback, không ai biết image đang chạy ở production thật ra chứa commit nào; hai bản build khác nhau cùng mang một nhãn.
+- **Nguyên nhân:** Chỉ dùng một nhãn chung chung cho mọi lần build thay vì tag theo commit và phiên bản phát hành, đồng thời không ghi lại digest.
+- **Fix:** Tag theo mã commit cho mọi lần build, cộng tag phiên bản khi phát hành chính thức, và luôn ghi lại digest bất biến của image đã đẩy để triển khai và rollback dùng chung một định danh.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Đọc workflow trả lời:** Trong `ci.yml` ở mục Code, job nào chạy trước và cơ chế nào đảm bảo thứ tự đó? Sự kiện nào khiến job build không đẩy image, và điều kiện nào trong workflow thực thi việc đó?
+2. **Thiết kế mở rộng:** Thêm vào workflow một job triển khai lên môi trường staging sau khi đẩy image. Bạn sẽ truyền định danh image cho job đó bằng cơ chế nào để đảm bảo triển khai đúng image đã kiểm thử, không lệch một byte?
+3. **Rà soát bảo mật:** Một đồng nghiệp đề xuất in toàn bộ biến môi trường ra log để debug một lỗi pipeline và dùng một action cộng đồng không ghim phiên bản. Viết phản hồi review gồm các rủi ro cụ thể và phương án thay thế cho từng đề xuất.
+4. **Tối ưu tốc độ:** Pipeline hiện mất rất lâu vì tải lại dependency Maven mỗi lần chạy. Nêu cơ chế cache bạn sẽ dùng, khóa cache nên dựa trên nội dung của những file nào, và một trường hợp khóa cache sai gây hậu quả gì.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- GitHub Docs — Understanding GitHub Actions: https://docs.github.com/en/actions/about-github-actions/understanding-github-actions
+- GitHub Docs — Workflow syntax for GitHub Actions: https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax
+- GitHub Docs — Using secrets in GitHub Actions: https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets
+
+## Đọc thêm
+
+Không có.

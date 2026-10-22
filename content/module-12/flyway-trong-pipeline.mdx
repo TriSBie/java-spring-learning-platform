@@ -1,0 +1,182 @@
+---
+title: "Flyway trong pipeline — Migration là một bước triển khai"
+module: 12
+level: "Middle"
+duration: 50
+order: 3
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Giải thích được vì sao tại Nova Loyalty, Flyway migration chạy như một bước riêng trong pipeline thay vì để ứng dụng tự chạy lúc khởi động.
+- Nhắc lại và áp dụng được quy ước đặt tên migration dạng 14 chữ số theo thời gian, cùng cơ chế bảng lịch sử và checksum của Flyway.
+- Thiết kế được xử lý khi migration thất bại trong pipeline: dừng triển khai, không đánh dấu thành công giả và có kế hoạch khôi phục rõ ràng.
+
+## Vì sao cần biết
+
+Nova Loyalty vận hành 5 datasource (core, gift, report, legacy, audit) không dùng JTA, và mọi thay đổi schema của các datasource này đều đi qua Flyway migration chạy trong pipeline — đây là một quyết định kiến trúc đã chốt. Nếu để từng replica của ứng dụng tự chạy migration lúc khởi động, nhiều rủi ro xuất hiện cùng lúc: các pod tranh nhau khóa migration, bản ứng dụng cũ chạy song song trong lúc rolling update gặp schema mới chưa tương thích, và một migration lỗi sẽ nổ tung lặp lại ở mọi lần khởi động. Chạy migration như một bước pipeline riêng, trước và tách khỏi việc triển khai ứng dụng, biến thay đổi schema thành một sự kiện có thứ tự, có kiểm chứng và có điểm dừng rõ ràng. Bài này nối lại kiến thức Flyway nền tảng với kỷ luật vận hành trong pipeline.
+
+## Nội dung chính
+
+### Vì sao migration thuộc về pipeline chứ không thuộc về lúc khởi động
+
+Ba lý do quyết định tại Nova Loyalty:
+
+- Tính đơn điểm theo thời gian: migration chạy đúng một lần, bởi đúng một tác nhân, tại một thời điểm xác định trong quy trình phát hành — thay vì N replica cùng thử chạy khi chúng khởi động.
+- Tách lỗi schema khỏi lỗi ứng dụng: nếu migration gãy, pipeline dừng ngay và ứng dụng mới chưa hề được triển khai; việc chẩn đoán không bị nhiễu bởi log khởi động của hàng loạt pod.
+- Thứ tự có kiểm soát với ứng dụng: pipeline quyết định migration chạy trước khi bản ứng dụng mới được đưa lên, và kết hợp với kỷ luật tương thích hai chiều (mục dưới), bản ứng dụng cũ đang chạy vẫn sống tốt với schema mới trong cửa sổ triển khai.
+
+Đổi lại, team phải chấp nhận thêm một bước trong pipeline và trách nhiệm giữ cho migration tương thích ngược trong cửa sổ triển khai — một đánh đổi có ý thức ở cấp kiến trúc.
+
+<Mermaid chart={`flowchart LR
+  Test[Job test đạt] --> Mig[Job Flyway migrate<br/>từng datasource theo thứ tự]
+  Mig -->|thành công| Deploy[Triển khai ứng dụng mới]
+  Mig -->|thất bại| Stop[Dừng pipeline<br/>không triển khai]
+  Deploy --> Smoke[Kiểm chứng sau triển khai]`} label="Vị trí của Flyway migrate trong pipeline Nova Loyalty: sau kiểm thử, trước triển khai ứng dụng, thất bại thì dừng toàn bộ." />
+
+### Quy ước tên 14 chữ số và thứ tự không thể thương lượng
+
+Flyway sắp xếp migration theo phiên bản trong tên file. Quy ước của Nova Loyalty dùng tiền tố phiên bản là dấu thời gian gồm 14 chữ số (năm, tháng, ngày, giờ, phút, giây) theo sau là mô tả ngắn gọn, ví dụ dạng tên gồm phần phiên bản 14 chữ số và phần mô tả ngăn cách đúng cú pháp của Flyway.
+
+Quy ước này cho ba đảm bảo: thứ tự migration được suy ra dứt khoát từ tên mà không cần một danh sách trung tâm; hai developer làm việc song song hiếm khi giẫm lên cùng một số phiên bản như khi dùng số thứ tự ngắn; và lịch sử thay đổi schema đọc được theo dòng thời gian ngay từ tên file. Một khi migration đã chạy ở bất kỳ môi trường dùng chung nào, file của nó trở thành bất biến: không sửa nội dung, không đổi tên — cần thay đổi thì viết một migration mới tiếp theo.
+
+### Bảng lịch sử, checksum và validate
+
+Flyway ghi lại mọi migration đã áp dụng vào một bảng lịch sử trong chính database đích, kèm checksum của nội dung file tại thời điểm áp dụng. Trước khi áp dụng migration mới, bước kiểm chứng đối chiếu các migration đã chạy với các file hiện có: nếu một file đã chạy bị sửa nội dung, checksum lệch và quá trình sẽ dừng với lỗi rõ ràng thay vì lặng lẽ áp dụng một lịch sử đã bị viết lại.
+
+Với 5 datasource, mỗi datasource có tập migration và bảng lịch sử riêng. Pipeline phải chạy migration cho từng datasource theo một thứ tự đã định và dừng ngay ở datasource đầu tiên thất bại, kèm log chỉ rõ datasource và migration nào gãy — đừng để một thông báo lỗi chung chung cho cả năm hệ thống.
+
+### Tương thích hai chiều trong cửa sổ triển khai
+
+Vì migration chạy trước ứng dụng mới, luôn tồn tại một cửa sổ mà ứng dụng cũ chạy trên schema mới. Kỷ luật bắt buộc là mọi migration phải tương thích ngược với phiên bản ứng dụng đang chạy: thêm cột cho phép rỗng trước, triển khai code dùng cột mới sau, rồi mới dọn dẹp cột cũ ở một bản phát hành kế tiếp nếu cần. Các thay đổi phá vỡ (đổi tên cột, xóa cột, thắt chặt ràng buộc) phải được chia thành nhiều bước qua nhiều bản phát hành. Đây là phần khó nhất của việc vận hành migration nghiêm túc, và là ranh giới giữa Middle và Senior trong chủ đề này.
+
+### Thứ tự migrate giữa các datasource và phụ thuộc chéo
+
+Năm datasource của Nova Loyalty không hoàn toàn độc lập về mặt ý nghĩa nghiệp vụ: một số báo cáo ở
+datasource report đọc dữ liệu có nguồn gốc từ core và gift, và một vài thay đổi lớn có thể chạm vào
+nhiều datasource trong cùng một đợt phát hành.
+Pipeline cần một thứ tự migrate đã được ghi thành quy ước — ví dụ các datasource chứa dữ liệu gốc
+được migrate trước các datasource dẫn xuất — và thứ tự này phải được kiểm chứng bằng cách chạy thử
+toàn bộ chuỗi trên môi trường staging với dữ liệu đại diện, không phải chỉ chạy từng datasource riêng lẻ.
+Khi thứ tự chưa được kiểm chứng, một migration ở datasource sau có thể tham chiếu tới cấu trúc mà
+migration ở datasource trước chưa kịp tạo ra ở môi trường thật.
+
+### Xử lý khi migration thất bại
+
+Nguyên tắc xử lý gồm bốn điểm: pipeline dừng và không triển khai ứng dụng mới; trạng thái của database được xác định chính xác (migration gãy đã áp dụng một phần nào chưa, tùy thuộc vào khả năng giao dịch của câu lệnh trong hệ quản trị đang dùng); bản sửa chữa đi qua một migration mới hoặc một quy trình sửa chữa được ghi chép, không bao giờ sửa tay lặng lẽ trên production rồi quên; và sự cố được ghi lại thành bài học trong thư viện sự cố của team. Tự động khôi phục bằng cách cố chạy ngược migration trong pipeline là một kỳ vọng nguy hiểm — phần lớn thay đổi schema không có chiều ngược tự động an toàn.
+
+## Code
+
+Một job migration riêng trong workflow, chạy Flyway bằng hình ảnh công cụ chính thức theo từng datasource (minh họa cho datasource core):
+
+```yaml filename=ci-flyway-job.yml
+name: nova-flyway-migrate
+
+on:
+  workflow_dispatch:
+
+jobs:
+  migrate-core:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Flyway migrate for core datasource
+        run: |
+          docker run --rm \
+            -v "$PWD/db/migration/core:/flyway/sql" \
+            flyway/flyway:latest \
+            -url="jdbc:postgresql://core-db.internal.example.invalid:5432/nova_core" \
+            -user="${{ secrets.CORE_DB_USER }}" \
+            -password="${{ secrets.CORE_DB_PASSWORD }}" \
+            migrate
+```
+
+Cấu trúc một file migration đúng quy ước đặt tên và kỷ luật tương thích ngược:
+
+```sql filename=V20261022101530__add_points_expiry_index.sql
+-- Migration: thêm chỉ mục phục vụ truy vấn điểm sắp hết hạn.
+-- Tương thích ngược: chỉ thêm chỉ mục, không đổi cấu trúc cột hiện hữu,
+-- nên phiên bản ứng dụng đang chạy không bị ảnh hưởng.
+
+CREATE INDEX IF NOT EXISTS idx_points_wallet_expiry
+    ON points_wallet (expiry_date);
+
+COMMENT ON INDEX idx_points_wallet_expiry IS 'Supports points expiry notice queries';
+```
+
+Cấu hình Flyway phía ứng dụng ở chế độ chỉ kiểm chứng tại các môi trường chạy thật, để migration không tự chạy lúc khởi động:
+
+```yaml filename=application-flyway.yml
+spring:
+  flyway:
+    # Migration được chạy bởi pipeline; ứng dụng không tự migrate khi khởi động
+    enabled: false
+```
+
+Lệnh kiểm chứng trạng thái migration của một datasource trước khi triển khai (dạng minh họa với cùng công cụ dòng lệnh):
+
+```bash filename=flyway-info-check.sh
+# Xem trạng thái các migration đã áp dụng và các migration đang chờ của datasource core
+docker run --rm \
+  -v "$PWD/db/migration/core:/flyway/sql" \
+  flyway/flyway:latest \
+  -url="jdbc:postgresql://core-db.internal.example.invalid:5432/nova_core" \
+  -user="${CORE_DB_USER}" \
+  -password="${CORE_DB_PASSWORD}" \
+  info
+```
+
+## Sai lầm thường gặp
+
+### 1. Sửa nội dung một migration đã chạy
+
+- **Triệu chứng:** Pipeline gãy ở bước kiểm chứng với lỗi lệch checksum, hoặc tệ hơn là các môi trường lặng lẽ có schema khác nhau dù cùng một "phiên bản".
+- **Nguyên nhân:** Ai đó sửa thẳng file migration đã áp dụng ở môi trường dùng chung thay vì viết một migration mới nối tiếp.
+- **Fix:** Coi migration đã chạy là bất biến tuyệt đối; mọi thay đổi đi qua migration mới. Lỗi checksum phải được điều tra tới nơi tới chốn, không xử lý bằng cách tắt kiểm chứng.
+
+### 2. Để ứng dụng tự migrate đồng thời với bước migrate của pipeline
+
+- **Triệu chứng:** Khóa migration bị tranh chấp khi nhiều pod khởi động cùng lúc, hoặc schema bị áp dụng hai đường khác nhau trong cùng một lần phát hành.
+- **Nguyên nhân:** Cấu hình Flyway phía ứng dụng vẫn bật chế độ tự chạy trong khi pipeline cũng chạy migration, vì file cấu hình mặc định được giữ nguyên không ai rà soát.
+- **Fix:** Chốt một chủ sở hữu duy nhất cho việc chạy migration — tại Nova Loyalty là pipeline — và tắt tường minh cơ chế tự chạy ở phía ứng dụng trong mọi môi trường chạy thật.
+
+### 3. Migration phá vỡ tương thích với ứng dụng đang chạy
+
+- **Triệu chứng:** Ngay sau bước migrate thành công, phiên bản ứng dụng cũ bắt đầu lỗi hàng loạt dù bản mới chưa hề được triển khai.
+- **Nguyên nhân:** Migration đổi tên hoặc xóa cột mà code đang chạy vẫn dùng; cửa sổ giữa migrate và triển khai ứng dụng mới biến thành vùng chết.
+- **Fix:** Áp kỷ luật tương thích hai chiều: thay đổi phá vỡ phải chia thành nhiều bước qua nhiều bản phát hành (thêm mới, chuyển code, dọn cũ sau cùng).
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Đặt tên migration:** Viết tên file đúng quy ước 14 chữ số cho ba thay đổi: thêm cột trạng thái cho bảng ví điểm, thêm bảng lịch sử đổi quà, thêm chỉ mục cho bảng giao dịch của datasource audit. Giải thích vì sao quy ước này thắng quy ước số thứ tự ngắn khi team đông người.
+2. **Đọc code trả lời:** Trong job ở mục Code, điều gì xảy ra với các bước tiếp theo của pipeline nếu lệnh migrate trả mã lỗi? Vì sao việc đặt migration trước bước triển khai ứng dụng lại làm cho thất bại này an toàn hơn?
+3. **Chia bước thay đổi phá vỡ:** Nhu cầu: đổi tên một cột trong bảng ví điểm của datasource core. Thiết kế chuỗi migration và phát hành tối thiểu 3 bước sao cho không thời điểm nào ứng dụng đang chạy bị lỗi vì schema.
+4. **Kịch bản sự cố:** Một migration cho datasource gift gãy giữa chừng ở production, trong khi core đã migrate xong. Viết quy trình xử lý gồm: xác định trạng thái thật của gift, quyết định đi tiếp hay dừng toàn bộ đợt phát hành, và cách ghi lại sự cố cho team.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Flyway — Documentation: https://flywaydb.org/documentation
+- Flyway — Community documentation and concepts: https://flywaydb.org/documentation/concepts/migrations.html
+- GitHub Docs — Workflow syntax for GitHub Actions: https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax
+
+## Đọc thêm
+
+Không có.

@@ -1,0 +1,234 @@
+---
+title: "Spring Cloud Config — Quản lý cấu hình tập trung"
+module: 10
+level: "Middle"
+duration: 45
+order: 1
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Spring Cloud 2023.0.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Giải thích được kiến trúc Config Server / Config Client và phân biệt được cơ chế `spring.config.import` với bootstrap context đời cũ.
+- Cấu hình được một service lấy cấu hình từ Config Server theo profile và label, kèm chiến lược fail-fast và retry hợp lý.
+- Đánh giá được trade-off của `@RefreshScope` và chọn được giữa refresh động, restart có kiểm soát và không refresh cho từng nhóm cấu hình.
+
+## Vì sao cần biết
+
+Nova Loyalty chạy nhiều service trên cùng nền Java 21 / Spring Boot 3.3.x: points, gift, report và các adapter tích hợp đối tác. Mỗi service lại có cấu hình riêng cho 5 datasource HikariCP (core, gift, report, legacy, audit) không dùng JTA, cộng endpoint Kafka, CRM và các timeout. Nếu mỗi team tự quản lý file cấu hình trong từng repo, chỉ sau vài vòng release là xuất hiện drift: service A ở production trỏ nhầm endpoint report, service B còn giữ timeout cũ. Spring Cloud Config cho một điểm quản lý tập trung, có versioning qua Git, để giảm drift — nhưng nó cũng tạo ra một điểm phụ thuộc mới lúc khởi động mà bạn phải hiểu rõ trước khi đưa vào production.
+
+## Nội dung chính
+
+### Vấn đề cấu hình phân tán
+
+Khi số service tăng, cấu hình rải rác gây ra ba nhóm lỗi lặp lại:
+
+- Drift giữa các môi trường: dev, staging và production lệch nhau ở những khóa không ai để ý.
+- Thay đổi cấu hình đòi hỏi build lại image dù bản chất chỉ là đổi một giá trị vận hành.
+- Khó truy vết: không rõ ai đã đổi cấu hình, đổi lúc nào và vì sao.
+
+Config Server giải quyết bằng cách phục vụ cấu hình từ một backend có versioning, thường là Git repository. Client lấy cấu hình theo tên ứng dụng, profile đang active và label (thường là branch hoặc tag).
+
+### Config Server và Config Client
+
+Config Server là một Spring Boot application được đánh dấu bằng annotation chuyên dụng và trỏ tới Git backend. Config Client là các service nghiệp vụ khai báo dependency `spring-cloud-starter-config` và một dòng import trong cấu hình.
+
+Thứ tự ưu tiên cần nhớ: cấu hình từ Config Server có độ ưu tiên cao hơn file local cùng tên trong nhiều trường hợp, nhưng hành vi chính xác phụ thuộc vào cách khai báo import và profile. Đừng đoán — hãy kiểm chứng bằng Actuator endpoint `env` trên môi trường test.
+
+<Mermaid chart={`flowchart LR
+  Git[Git repo<br/>app.yml / app-prod.yml] --> Server[Config Server]
+  Server --> A[points-service<br/>profile prod]
+  Server --> B[gift-service<br/>profile prod]
+  Server --> C[report-service<br/>profile prod]
+  A --> Act[Actuator env / refresh]
+  B --> Act`} label="Config Server phục vụ cấu hình từ Git cho nhiều service Nova Loyalty theo application name và profile." />
+
+### Bootstrap đời cũ và config data hiện nay
+
+Từ Spring Boot 2.4, cơ chế nạp cấu hình được làm lại theo hướng config data API. Cách hiện đại và được khuyến nghị với Spring Cloud 2023.0.x (tương thích với Boot 3.3) là dùng khóa `spring.config.import` trỏ tới Config Server, thay vì dựa vào bootstrap context riêng như các phiên bản rất cũ.
+
+Hệ quả thực tế khi migrate:
+
+- Không cần thêm dependency bootstrap chỉ để Config Client hoạt động trong setup chuẩn.
+- Hành vi fail-fast phải được khai báo tường minh nếu bạn muốn service dừng khởi động khi không lấy được cấu hình bắt buộc.
+- Thứ tự import quyết định nguồn nào thắng khi trùng khóa.
+
+> [!WARNING] Cần verify với docs version Spring Cloud 2023.0.x: chi tiết về `spring.cloud.config.fail-fast` và hành vi retry khi dùng config import có khác biệt nhỏ giữa các bản vá; hãy đối chiếu tài liệu của đúng bản đang dùng trước khi áp dụng cho production.
+
+### Profile, label và cấu trúc file trên Git
+
+Quy ước đặt tên file phổ biến trên backend Git:
+
+- File dùng chung cho một service ở mọi môi trường.
+- File riêng theo profile, ví dụ hậu tố `-prod` cho production.
+- File dùng chung cho nhiều service khi thật sự có khóa dùng chung.
+
+Nguyên tắc an toàn: đừng đưa secret thật vào Git dạng plaintext. Config Server hỗ trợ mã hóa, nhưng trong môi trường Kubernetes, secret thường được quản lý bằng Secret của cluster hoặc hệ thống quản lý secret chuyên dụng (xem Module 11). Config Server phù hợp nhất cho cấu hình vận hành không nhạy cảm và các feature flag dạng cấu hình.
+
+### RefreshScope: tiện nhưng không miễn phí
+
+`@RefreshScope` cho phép bean được tạo lại khi cấu hình thay đổi mà không cần restart toàn bộ ứng dụng, thường kết hợp với việc gọi endpoint refresh của Actuator hoặc cơ chế bus.
+
+Trade-off cần đánh giá thẳng thắn:
+
+- Ưu điểm: đổi được một số giá trị vận hành (ví dụ ngưỡng, thông điệp, bật tắt tính năng) mà không downtime.
+- Chi phí: bean bị hủy và tạo lại giữa lúc đang phục vụ request; nếu bean giữ state, giữ connection hoặc giữ cache ấm, hành vi sẽ khó lường.
+- Cấu hình hạ tầng như datasource URL, pool size của HikariCP hay credential KHÔNG nên kỳ vọng refresh động an toàn — các thành phần này nên thay đổi bằng restart có kiểm soát qua rolling update.
+
+Khuyến nghị cho Nova Loyalty: chỉ đặt `@RefreshScope` cho bean cấu hình thuần dữ liệu, không giữ tài nguyên; mọi thay đổi liên quan tới 5 datasource đều đi qua quy trình deploy lại.
+
+### Fail-fast, retry và tính sẵn sàng
+
+Nếu Config Server là bắt buộc, service phải fail-fast khi không lấy được cấu hình thay vì khởi động với giá trị mặc định sai. Ngược lại, nếu service có thể chạy an toàn với cấu hình local dự phòng, hãy ghi rõ quyết định đó trong tài liệu vận hành. Retry với backoff giúp chống lại dao động mạng ngắn lúc khởi động đồng loạt, nhưng không thay thế được việc chạy Config Server ở chế độ sẵn sàng cao khi nó nằm trên đường khởi động của toàn hệ thống.
+
+## Code
+
+Cấu hình phía client (service nghiệp vụ) dùng config import. Lưu ý dòng import nằm trong file cấu hình của client:
+
+```yaml filename=application.yml
+spring:
+  application:
+    name: points-service
+  config:
+    import: "configserver:http://config-server:8888"
+  cloud:
+    config:
+      fail-fast: true
+      retry:
+        initial-interval: 1000
+        max-interval: 4000
+        max-attempts: 4
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,env,refresh
+```
+
+Phía server, một application tối thiểu trỏ tới Git backend:
+
+```yaml filename=config-server-application.yml
+server:
+  port: 8888
+spring:
+  application:
+    name: config-server
+  cloud:
+    config:
+      server:
+        git:
+          uri: https://example.invalid/nova-config-repo.git
+          default-label: main
+          search-paths: "{application}"
+```
+
+Bean cấu hình có thể refresh an toàn — chỉ chứa dữ liệu thuần, không giữ connection:
+
+```java filename=LoyaltyFeatureProperties.java
+package com.nova.loyalty.config;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.cloud.context.config.annotation.RefreshScope;
+import org.springframework.stereotype.Component;
+
+@RefreshScope
+@Component
+@ConfigurationProperties(prefix = "nova.loyalty.features")
+public class LoyaltyFeatureProperties {
+
+    private boolean giftRedemptionEnabled = true;
+    private int pointsExpiryNoticeDays = 30;
+    private String maintenanceMessage = "";
+
+    public boolean isGiftRedemptionEnabled() {
+        return giftRedemptionEnabled;
+    }
+
+    public void setGiftRedemptionEnabled(boolean giftRedemptionEnabled) {
+        this.giftRedemptionEnabled = giftRedemptionEnabled;
+    }
+
+    public int getPointsExpiryNoticeDays() {
+        return pointsExpiryNoticeDays;
+    }
+
+    public void setPointsExpiryNoticeDays(int pointsExpiryNoticeDays) {
+        this.pointsExpiryNoticeDays = pointsExpiryNoticeDays;
+    }
+
+    public String getMaintenanceMessage() {
+        return maintenanceMessage;
+    }
+
+    public void setMaintenanceMessage(String maintenanceMessage) {
+        this.maintenanceMessage = maintenanceMessage;
+    }
+}
+```
+
+Dependency phía client trong `pom.xml`:
+
+```xml filename=pom-config-client.xml
+<dependencies>
+    <dependency>
+        <groupId>org.springframework.cloud</groupId>
+        <artifactId>spring-cloud-starter-config</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+</dependencies>
+```
+
+## Sai lầm thường gặp
+
+### 1. Đưa secret plaintext lên Git của Config Server
+
+- **Triệu chứng:** Credential database và API key của đối tác xuất hiện trong lịch sử Git, không thể thu hồi triệt để chỉ bằng một commit xóa.
+- **Nguyên nhân:** Coi Config Server là nơi chứa mọi loại cấu hình, kể cả secret, mà không có cơ chế mã hóa hay quản lý vòng đời.
+- **Fix:** Chỉ đưa cấu hình vận hành không nhạy cảm lên Git; secret đi qua Kubernetes Secret hoặc hệ thống quản lý secret chuyên dụng và được inject lúc runtime.
+
+### 2. Kỳ vọng RefreshScope làm mới được datasource
+
+- **Triệu chứng:** Đổi URL hoặc pool size của HikariCP qua refresh nhưng service vẫn dùng pool cũ, hoặc lỗi lạ xuất hiện sau refresh.
+- **Nguyên nhân:** Pool và connection là tài nguyên có vòng đời riêng; việc tạo lại bean cấu hình không đồng nghĩa tài nguyên hạ tầng được dựng lại an toàn.
+- **Fix:** Thay đổi cấu hình datasource bằng rolling restart; giới hạn `@RefreshScope` cho bean dữ liệu thuần đã được kiểm chứng.
+
+### 3. Thiếu fail-fast nên service chạy với cấu hình mặc định sai
+
+- **Triệu chứng:** Service khởi động thành công khi Config Server chết, nhưng trỏ tới database hoặc endpoint mặc định của môi trường dev.
+- **Nguyên nhân:** Không khai báo hành vi bắt buộc lấy cấu hình và không kiểm chứng giá trị hiệu lực qua Actuator sau khi khởi động.
+- **Fix:** Bật fail-fast cho cấu hình bắt buộc, cấu hình retry có backoff, và kiểm tra endpoint `env` trong pipeline smoke test sau deploy.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Thiết kế:** Vẽ sơ đồ Config Server cho Nova Loyalty với 3 service (points, gift, report), ghi rõ file cấu hình nào dùng chung, file nào theo profile `prod`, và khóa nào tuyệt đối không được lên Git.
+2. **Phân loại refresh:** Lập bảng 8 khóa cấu hình thực tế (datasource URL, pool size, timeout gọi CRM, feature flag đổi quà, thông điệp bảo trì, ngưỡng cảnh báo, Kafka topic name, log level) và phân loại: refresh động an toàn / phải restart / không chắc chắn kèm lý do.
+3. **Đọc code trả lời:** Đọc `LoyaltyFeatureProperties` ở mục Code: điều gì xảy ra với một request đang chạy dở khi bean này bị refresh giữa chừng? Nêu một loại bean KHÔNG nên đặt `@RefreshScope` và giải thích vì sao.
+4. **Kịch bản sự cố:** Config Server chết đúng lúc toàn bộ service khởi động lại sau sự cố điện. Viết kế hoạch giảm thiểu gồm ít nhất 3 biện pháp ở tầng kiến trúc, cấu hình client và quy trình vận hành.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Cloud Config — Reference Documentation: https://docs.spring.io/spring-cloud-config/docs/current/reference/html/
+- Spring Cloud — Release train và tương thích phiên bản: https://docs.spring.io/spring-cloud/docs/current/reference/html/
+- Spring Boot — Externalized Configuration: https://docs.spring.io/spring-boot/reference/features/external-config.html
+
+## Đọc thêm
+
+Không có.

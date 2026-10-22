@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Định nghĩa được SLI và SLO kèm cửa sổ đo cho các dịch vụ trọng điểm.",
+    "Tính được ngân sách lỗi từ SLO và diễn giải được tốc độ tiêu thụ ngân sách.",
+    "Viết được alert rules có thời gian chờ, nhãn mức độ và tóm tắt rõ triệu chứng.",
+    "Hiệu chỉnh được ngưỡng bằng số đo thật thay vì sao chép từ hệ thống khác.",
+    "Soạn được runbook tối thiểu đi kèm mỗi cảnh báo production.",
+    "Phân biệt được cảnh báo triệu chứng hướng người dùng với cảnh báo nguyên nhân nội bộ."
+  ],
+  "quiz": [
+    {
+      "question": "SLI khác SLO ở điểm nào?",
+      "options": [
+        "Không khác nhau",
+        "SLI là chỉ số đo được từ số liệu thật, SLO là ngưỡng mục tiêu cam kết cho chỉ số đó trong một cửa sổ thời gian",
+        "SLI do đội kỹ thuật đặt, SLO do máy tự tính",
+        "SLO là một loại dashboard"
+      ],
+      "answerIndex": 1,
+      "explanation": "Đo lường và cam kết là hai việc khác nhau: SLI cho con số, SLO cho chuẩn để đánh giá con số đó và suy ra ngân sách lỗi."
+    },
+    {
+      "question": "Ngân sách lỗi được dùng để quyết định điều gì?",
+      "options": [
+        "Số lượng developer cần tuyển",
+        "Dung lượng đĩa cho log",
+        "Mức độ mạo hiểm phát hành được phép: ngân sách còn nhiều thì phát hành nhanh, gần cạn thì ưu tiên ổn định",
+        "Số lượng dashboard cần vẽ"
+      ],
+      "answerIndex": 2,
+      "explanation": "Ngân sách lỗi biến độ tin cậy thành một nguồn lực quản trị được, cân bằng tốc độ thay đổi với cam kết dịch vụ."
+    },
+    {
+      "question": "Vì sao rule tỉ lệ lỗi cần điều kiện mẫu số tối thiểu?",
+      "options": [
+        "Để tránh tỉ lệ giả cao trên lượng request quá nhỏ, đặc biệt giờ thấp điểm",
+        "Để biểu thức trông phức tạp hơn",
+        "Vì Prometheus yêu cầu vậy",
+        "Để rule chạy chậm lại"
+      ],
+      "answerIndex": 0,
+      "explanation": "Một lỗi trên ba request là tỉ lệ rất cao nhưng không phải sự cố. Mẫu số tối thiểu giữ cảnh báo trung thực với trải nghiệm thật."
+    },
+    {
+      "question": "Khoảng thời gian chờ cháy trong rule có tác dụng gì?",
+      "options": [
+        "Trì hoãn cảnh báo cho đỡ phiền",
+        "Tăng độ chính xác của metrics",
+        "Thay thế runbook",
+        "Lọc nhiễu thoáng qua, chỉ cảnh báo khi điều kiện kéo dài đủ lâu để là tín hiệu thật"
+      ],
+      "answerIndex": 3,
+      "explanation": "Thời gian chờ là thỏa thuận giữa tốc độ phát hiện và độ tin cậy của tín hiệu, phải chỉnh theo tính chất từng chỉ số."
+    },
+    {
+      "question": "Rule lag cho CRM consumer cần lưu ý ngữ cảnh nào của Nova?",
+      "options": [
+        "Màu của dashboard",
+        "Cửa sổ draining sau triển khai có thể tạo lag tạm thời có chủ đích, cần ngoại lệ hoặc ngưỡng theo ngữ cảnh",
+        "Tên của người trực",
+        "Số lượng topic trong cụm"
+      ],
+      "answerIndex": 1,
+      "explanation": "Lag không đọc kèm ngữ cảnh vận hành sẽ cháy giả sau mỗi lần deploy, làm mòn niềm tin của ca trực rất nhanh."
+    },
+    {
+      "question": "Một cảnh báo production được coi là chưa hoàn thành khi thiếu gì?",
+      "options": [
+        "Thiếu màu đỏ trên dashboard",
+        "Thiếu người đặt tên rule",
+        "Thiếu biểu đồ riêng",
+        "Thiếu runbook hướng dẫn khoanh vùng và xử lý đi kèm"
+      ],
+      "answerIndex": 3,
+      "explanation": "Cảnh báo là điểm bắt đầu của hành động con người. Không có runbook, thời gian xử lý phụ thuộc hoàn toàn vào trí nhớ cá nhân."
+    },
+    {
+      "question": "Cảnh báo theo triệu chứng hướng người dùng tốt hơn cảnh báo nguyên nhân ở điểm nào?",
+      "options": [
+        "Nó luôn cháy sớm hơn",
+        "Nó không cần metrics",
+        "Nó cháy đúng khi trải nghiệm thật bị ảnh hưởng, tránh đánh thức vì các bất thường nội bộ chưa tác động tới ai",
+        "Nó thay thế được điều tra nguyên nhân"
+      ],
+      "answerIndex": 2,
+      "explanation": "Cảnh báo nguyên nhân vẫn có giá trị chẩn đoán, nhưng quyền đánh thức con người nên thuộc về tín hiệu gắn với trải nghiệm."
+    },
+    {
+      "question": "Ngưỡng cảnh báo nên được hiệu chỉnh bằng dữ liệu nào?",
+      "options": [
+        "Phân phối số đo lịch sử của chính hệ thống được giám sát, review lại sau thay đổi kiến trúc",
+        "Bài viết về hệ thống nổi tiếng khác",
+        "Giá trị mặc định của công cụ",
+        "Ý kiến của người trực lâu năm nhất mà không cần số liệu"
+      ],
+      "answerIndex": 0,
+      "explanation": "Mọi hệ thống có phân phối tải và độ trễ riêng. Ngưỡng vay mượn là nguồn cháy giả và điểm mù kinh điển."
+    },
+    {
+      "question": "Runbook tốt bắt đầu bằng phần nào?",
+      "options": [
+        "Danh sách người từng trực ca",
+        "Lệnh khởi động lại toàn hệ thống",
+        "Triệu chứng và cách xác nhận cảnh báo là thật trước khi làm bất cứ hành động nào",
+        "Mẫu báo cáo sự cố"
+      ],
+      "answerIndex": 2,
+      "explanation": "Xác nhận tín hiệu trước khi hành động tránh việc chữa một cảnh báo giả bằng thay đổi thật trên production."
+    },
+    {
+      "question": "Sau một sự cố, việc hậu kiểm nào là bắt buộc với hệ thống cảnh báo?",
+      "options": [
+        "Xóa rule vừa cháy",
+        "Đối chiếu diễn biến thật với rule, dashboard và runbook; sửa điểm mù đã lộ ra và ghi lại thay đổi",
+        "Tăng mọi ngưỡng lên gấp đôi",
+        "Không cần làm gì nếu dịch vụ đã hồi phục"
+      ],
+      "answerIndex": 1,
+      "explanation": "Sự cố là bài kiểm tra đắt giá nhất của observability. Không hậu kiểm thì cùng một điểm mù sẽ gây hại lần nữa."
+    }
+  ]
+}

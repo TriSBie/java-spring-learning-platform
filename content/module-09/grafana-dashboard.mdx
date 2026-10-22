@@ -1,0 +1,202 @@
+---
+title: "Grafana Dashboard cho JVM, Hikari và Kafka Lag"
+module: 9
+level: "Middle"
+duration: 45
+order: 2
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Micrometer 1.13.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Thiết kế được một dashboard gồm 3 hàng: sức khỏe JVM, sức khỏe pool Hikari của 5 datasource và độ trễ tiêu thụ Kafka của CRM consumer.
+- Viết được truy vấn cho từng panel từ metrics có thật của Actuator và Micrometer, tránh panel trang trí không trả lời câu hỏi vận hành nào.
+- Đóng gói được dashboard dạng JSON có thể nhập lại vào Grafana, đặt biến chọn service để dùng chung cho mọi service của Nova Loyalty.
+
+## Vì sao cần biết
+
+Dashboard là mặt tiền của observability tại Nova Loyalty: ca trực nhìn vào đó để quyết định trong vài chục giây xem sự cố nằm ở JVM, ở pool của datasource nào trong 5 datasource, hay ở consumer đang draining theo cửa sổ 75 giây. Một dashboard tốt trả lời câu hỏi theo thứ tự điều tra, mỗi panel có ngưỡng và ngữ cảnh; một dashboard xấu là bức tường đồ thị trang trí không ai đọc lúc có sự cố. Bài này xây dashboard chuẩn cho Nova từ metrics của bài trước, gồm cả JSON mẫu có thể nhập thẳng vào Grafana.
+
+## Nội dung chính
+
+### Nguyên tắc: mỗi panel trả lời một câu hỏi
+
+Panel độ trễ phải cho thấy phân vị cao theo route gateway, không chỉ trung bình.
+Panel lỗi phải đặt cạnh panel lưu lượng để phân biệt lỗi thật với mẫu số quá nhỏ.
+Panel tài nguyên phải đọc được trong cùng cửa sổ thời gian với panel nghiệp vụ để tương quan.
+Mọi panel đều cần đơn vị đúng, ngưỡng tham chiếu và mô tả ngắn về hành động khi vượt ngưỡng.
+Nếu một panel không gợi ra được hành động nào, nó là ứng viên bị xóa khỏi dashboard.
+
+### Hàng JVM: bộ nhớ, GC và thread
+
+Các panel cốt lõi gồm heap đã dùng so với heap tối đa, thời gian pause thu gom, số thread sống và CPU tiến trình.
+Heap tăng đều không hạ sau thu gom là tín hiệu khác hẳn heap dao động răng cưa khỏe mạnh.
+Pause thu gom phải đọc cùng hàng với độ trễ API để thấy tương quan nhân quả.
+Đặt cùng một khoảng thời gian cho toàn dashboard để mọi tương quan đều hợp lệ.
+
+### Hàng pool và hàng Kafka
+
+Pool của từng datasource cần panel riêng cho connection đang hoạt động, thread đang chờ và thời gian chờ.
+Việc tách theo tên pool giúp ca trực chỉ đúng datasource gây nghẽn trong 5 datasource của Nova.
+Hàng Kafka hiển thị độ trễ tiêu thụ theo consumer group và topic, đặc biệt là nhóm CRM sync.
+Khi độ trễ tăng trong lúc consumer đang draining sau deploy, ca trực cần phân biệt được draining bình thường với tắc nghẽn thật.
+
+<Mermaid chart={`flowchart TD
+  D[Dashboard Nova] --> R1[Hàng 1: RED theo route gateway]
+  D --> R2[Hàng 2: JVM heap, GC, thread]
+  D --> R3[Hàng 3: Hikari theo từng datasource]
+  D --> R4[Hàng 4: Kafka consumer lag]`} label="Cấu trúc dashboard theo thứ tự điều tra sự cố tại Nova Loyalty" />
+
+### Dashboard as code
+
+Dashboard nên được lưu dạng JSON trong repo cùng mã nguồn của hệ thống.
+Biến mẫu cho service và datasource giúp một dashboard phục vụ nhiều service mà không sao chép.
+Mọi thay đổi dashboard đi qua review như code, kèm lý do và câu hỏi vận hành mới được trả lời.
+
+## Code
+
+Dashboard JSON dưới đây là bản rút gọn có thể nhập vào Grafana. Metrics nguồn đến từ Actuator và Micrometer của bài trước; consumer lag đến từ exporter hoặc meter của consumer.
+
+```json filename=grafana-dashboard.json
+{
+  "title": "Nova Loyalty - Service Health",
+  "uid": "nova-service-health",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "type": "query",
+        "query": "label_values(up, service)",
+        "current": { "text": "points-api", "value": "points-api" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "HTTP p95 latency by route",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, uri) (rate(http_server_requests_seconds_bucket{service=~'$service'}[5m])))",
+          "legendFormat": "{{uri}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "JVM heap used vs max",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(jvm_memory_used_bytes{service=~'$service', area='heap'})", "legendFormat": "used" },
+        { "expr": "sum(jvm_memory_max_bytes{service=~'$service', area='heap'})", "legendFormat": "max" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Hikari active connections by pool",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "hikaricp_connections_active{service=~'$service'}", "legendFormat": "{{pool}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Kafka consumer lag (CRM sync)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum by (group) (kafka_consumer_lag{service=~'$service'})", "legendFormat": "{{group}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    }
+  ]
+}
+```
+
+```java filename=DashboardSupportMetrics.java
+package com.nova.loyalty.observe;
+
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
+import java.util.concurrent.atomic.AtomicLong;
+import org.springframework.stereotype.Component;
+
+@Component
+public class DashboardSupportMetrics {
+
+    private final AtomicLong consumerLag = new AtomicLong(0L);
+
+    public DashboardSupportMetrics(MeterRegistry registry) {
+        Gauge.builder("kafka.consumer.lag", consumerLag, AtomicLong::doubleValue)
+                .tag("group", "crm-sync")
+                .description("Do tre tieu thu cua nhom CRM sync")
+                .register(registry);
+    }
+
+    public void updateLag(long lag) {
+        consumerLag.set(Math.max(0L, lag));
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Dashboard toàn đồ thị mặc định không chỉnh sửa
+
+- **Triệu chứng:** Ca trực mất nhiều phút vẫn không trả lời được sự cố nằm ở tầng nào.
+- **Nguyên nhân:** Panel mặc định không gắn với câu hỏi vận hành và ngưỡng của hệ thống cụ thể.
+- **Fix:** Thiết kế dashboard theo thứ tự điều tra của chính hệ thống, mỗi panel có câu hỏi, ngưỡng và hành động gợi ý.
+
+### 2. Panel tỉ lệ lỗi không đặt cạnh lưu lượng
+
+- **Triệu chứng:** Nửa đêm tỉ lệ lỗi báo đỏ liên tục dù chỉ có vài request và một lỗi duy nhất.
+- **Nguyên nhân:** Tỉ lệ trên mẫu số quá nhỏ tạo tín hiệu giả, làm mòn niềm tin vào dashboard.
+- **Fix:** Luôn hiển thị lưu lượng cạnh tỉ lệ lỗi và đặt điều kiện mẫu số tối thiểu cho mọi nhận định.
+
+### 3. Một panel gộp chung mọi datasource
+
+- **Triệu chứng:** Đồ thị pool chỉ cho thấy một đường tăng mà không biết datasource nào trong 5 datasource đang nghẽn.
+- **Nguyên nhân:** Thiếu chiều phân tách theo tên pool khiến bước khoanh vùng đầu tiên bị chặn.
+- **Fix:** Tách chuỗi số theo nhãn pool và dùng biến chọn datasource để ca trực khoanh vùng ngay trong một màn hình.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Thiết kế:** Vẽ bố cục dashboard cho job import file đối tác gồm 4 hàng theo thứ tự điều tra, ghi câu hỏi của từng panel.
+2. **Đọc JSON:** Chỉ ra cách biến service trong dashboard mẫu được dùng trong các truy vấn và điều gì xảy ra nếu một service không có metric lag.
+3. **Viết tay:** Viết thêm một panel cho thời gian chờ lấy connection của pool `legacy` kèm ngưỡng tham chiếu và hành động khi vượt ngưỡng.
+4. **Phản biện:** Liệt kê 3 panel trang trí thường gặp trên dashboard mặc định và lý do xóa chúng khỏi màn hình ca trực.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Micrometer — Documentation: https://micrometer.io/docs
+- Spring Boot — Actuator Metrics: https://docs.spring.io/spring-boot/reference/actuator/metrics.html
+- Kafka — Monitoring: https://kafka.apache.org/documentation/#monitoring
+
+## Đọc thêm
+
+Không có.

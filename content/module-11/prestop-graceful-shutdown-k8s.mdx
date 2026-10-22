@@ -1,0 +1,214 @@
+---
+title: "preStop và graceful shutdown — Bài toán draining 75 giây"
+module: 11
+level: "Senior"
+duration: 55
+order: 5
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Kafka 3.8"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Vẽ được toàn bộ chuỗi sự kiện khi Kubernetes xóa một pod, từ rút khỏi Service tới SIGTERM và hết thời gian ân hạn.
+- Cấu hình đồng bộ được ba lớp: hook `preStop`, `terminationGracePeriodSeconds` và `server.shutdown=graceful` của Spring Boot, khớp với ngân sách draining 75 giây của Nova Loyalty.
+- Phân tích được các điểm rò rỉ của quá trình tắt (request đang dở, message Kafka đang xử lý, kết nối đang mượn) và thiết kế cách đóng từng điểm rò rỉ.
+
+## Vì sao cần biết
+
+Nova Loyalty có một con số vận hành rất cụ thể: consumer phía CRM xử lý sự kiện điểm từ pipeline Outbox, qua Debezium, qua Kafka có ngân sách draining ở tầng ứng dụng là 75 giây kể từ khi nhận tín hiệu tắt. Trong 75 giây đó, consumer phải ngừng nhận message mới, xử lý xong message đang dở và commit offset — nếu bị giết giữa chừng, message sẽ bị xử lý lại ở instance khác và mọi đảm bảo idempotency sẽ bị thử thách không cần thiết. Trên Kubernetes, ngân sách 75 giây này chỉ có ý nghĩa nếu manifest được cấu hình khớp: hook `preStop` để rút pod khỏi đường traffic trước, `terminationGracePeriodSeconds` đủ lớn để chứa toàn bộ quá trình tắt, và Spring Boot được đặt ở chế độ tắt từ tốn. Chỉ cần một trong ba lớp lệch nhau, hệ thống sẽ mất dữ liệu đang bay hoặc giết oan công việc đang dở — đây là bài toán Senior điển hình vì nó nằm ở giao điểm của ứng dụng, nền tảng và nghiệp vụ.
+
+## Nội dung chính
+
+### Chuỗi sự kiện khi một pod bị xóa
+
+Khi Kubernetes quyết định xóa pod (do scale down, rolling update hoặc node bảo trì), chuỗi sự kiện diễn ra gần như đồng thời ở hai mặt:
+
+- Mặt mạng: pod bị đánh dấu sắp kết thúc và bị rút khỏi danh sách đầu cuối của Service. Việc rút này lan truyền không tức thời tới mọi thành phần giữ danh sách đầu cuối — đây là lý do tồn tại của hook `preStop` dạng chờ.
+- Mặt tiến trình: các hook `preStop` trong container được chạy; khi hook hoàn tất (hoặc hết thời gian chờ của hook), container nhận SIGTERM; nếu tiến trình chưa thoát sau khi `terminationGracePeriodSeconds` kết thúc, nó nhận SIGKILL và chết ngay lập tức bất kể đang làm gì.
+
+Tổng thời gian từ lúc bắt đầu xóa tới SIGKILL bị chặn bởi `terminationGracePeriodSeconds`: cả hook `preStop` và quá trình tắt của ứng dụng đều phải nằm gọn trong ngân sách này. Đây là điểm cấu hình bị hiểu sai nhiều nhất — tăng thời gian ngủ trong `preStop` mà quên tăng ngân sách tổng thể sẽ khiến ứng dụng bị cắt mất phần thời gian tắt của chính nó.
+
+<Mermaid chart={`sequenceDiagram
+  autonumber
+  K8s->>Pod: Đánh dấu terminating, rút khỏi Service endpoints
+  K8s->>Pod: Chạy preStop hook (chờ lan truyền endpoints)
+  K8s->>App: SIGTERM
+  App->>App: Ngừng nhận request/message mới
+  App->>App: Xử lý xong phần đang dở, commit offset Kafka
+  App->>K8s: Tiến trình thoát trước hạn ân hạn
+  Note over K8s,App: Nếu vượt terminationGracePeriodSeconds: SIGKILL`} label="Chuỗi tắt pod tại Nova Loyalty: preStop chờ rút traffic, SIGTERM kích hoạt draining trong ngân sách 75 giây, SIGKILL là giới hạn cứng cuối cùng." />
+
+### preStop dạng chờ: vì sao lại ngủ trước khi tắt
+
+Hook `preStop` phổ biến nhất cho web service là một lệnh ngủ ngắn. Lý do nghe ngược đời nhưng rất thực tế: việc rút pod khỏi danh sách đầu cuối của Service cần thời gian lan truyền tới các thành phần định tuyến; trong khoảng lan truyền đó, request mới vẫn có thể được gửi tới pod sắp chết. Ngủ một khoảng ngắn ở `preStop` (trước cả SIGTERM) cho quá trình rút traffic kịp hoàn tất, để khi ứng dụng bắt đầu tắt thật thì gần như không còn request mới bay tới.
+
+Lưu ý: khoảng ngủ này ăn vào ngân sách `terminationGracePeriodSeconds`, nên tổng thiết kế phải cộng cả ba phần: thời gian chờ lan truyền, thời gian draining của ứng dụng, và một khoảng đệm an toàn.
+
+### Phía Spring Boot: tắt từ tốn và vòng đời
+
+Spring Boot hỗ trợ tắt từ tốn qua khóa cấu hình `server.shutdown` đặt là `graceful`: máy chủ web ngừng nhận kết nối mới nhưng chờ các request đang xử lý hoàn tất trong giới hạn của từng giai đoạn vòng đời, được điều tiết bởi khóa thời gian chờ tắt theo giai đoạn. Đối với consumer Kafka, cơ chế tắt nằm ở listener container: khi application context đóng, listener ngừng poll và cho phép bản ghi đang xử lý hoàn tất trước khi đóng consumer và commit những gì cần commit.
+
+Phía ứng dụng của Nova Loyalty đã có sẵn ngân sách draining 75 giây cho consumer CRM (xem Module 06). Việc của bài này là làm cho tầng Kubernetes tôn trọng ngân sách đó thay vì vô tình cắt ngắn nó.
+
+### Căn chỉnh ba lớp cho ngân sách 75 giây
+
+Thiết kế khớp cho Nova Loyalty:
+
+- `terminationGracePeriodSeconds`: đặt lớn hơn tổng của `preStop` chờ lan truyền cộng 75 giây draining và khoảng đệm; nếu đặt đúng bằng 75 thì phần chờ của `preStop` sẽ ăn mất thời gian draining thật.
+- Hook `preStop`: chỉ chờ lan truyền đầu cuối, ngắn và có mục đích rõ ràng; không đặt logic nghiệp vụ trong hook.
+- Spring Boot: `server.shutdown=graceful` cho các service có HTTP, thời gian chờ tắt theo giai đoạn đủ cho request dài nhất hợp lệ; phía Kafka để listener container tắt có trật tự trong cùng ngân sách.
+
+Bất đẳng thức cần thuộc lòng: thời gian `preStop` cộng thời gian draining thực tế cộng đệm an toàn phải nhỏ hơn hoặc bằng `terminationGracePeriodSeconds`. Việc kiểm chứng phải làm bằng diễn tập tắt pod có đo thời gian thật, không phải bằng niềm tin vào manifest.
+
+## Code
+
+Manifest hoàn chỉnh cho consumer CRM của Nova Loyalty với cả ba lớp đã căn chỉnh:
+
+```yaml filename=deployment-crm-consumer.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nova-crm-consumer
+  labels:
+    app: nova-crm-consumer
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nova-crm-consumer
+  template:
+    metadata:
+      labels:
+        app: nova-crm-consumer
+    spec:
+      # 10s preStop + 75s draining + đệm an toàn đều nằm trong ngân sách này
+      terminationGracePeriodSeconds: 100
+      containers:
+        - name: crm-consumer
+          image: registry.example.invalid/nova/crm-consumer:1.4.2
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 10"]
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+```
+
+Cấu hình phía Spring Boot cho một service HTTP của Nova Loyalty dùng chung ngân sách tắt:
+
+```yaml filename=application-graceful.yml
+server:
+  shutdown: graceful
+spring:
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+  kafka:
+    listener:
+      ack-mode: record
+```
+
+Minh họa phía mã cho một thành phần tự quản lý quá trình draining khi context đóng (dạng rút gọn để học cơ chế):
+
+```java filename=DrainingLifecycle.java
+package com.nova.loyalty.crm;
+
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.context.SmartLifecycle;
+import org.springframework.stereotype.Component;
+
+@Component
+public class DrainingLifecycle implements SmartLifecycle {
+
+    private static final Logger log = LoggerFactory.getLogger(DrainingLifecycle.class);
+
+    private final AtomicBoolean running = new AtomicBoolean(false);
+    private final CrmSyncWorker worker;
+
+    public DrainingLifecycle(CrmSyncWorker worker) {
+        this.worker = worker;
+    }
+
+    @Override
+    public void start() {
+        running.set(true);
+        log.info("Draining lifecycle started");
+    }
+
+    @Override
+    public void stop() {
+        log.info("Shutdown signal received: stop accepting new work and drain in-flight work");
+        worker.stopAcceptingNewWork();
+        worker.awaitInFlightCompletion();
+        running.set(false);
+    }
+
+    @Override
+    public boolean isRunning() {
+        return running.get();
+    }
+
+    @Override
+    public int getPhase() {
+        return Integer.MAX_VALUE - 10;
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. terminationGracePeriodSeconds nhỏ hơn ngân sách draining của ứng dụng
+
+- **Triệu chứng:** Consumer đang xử lý message thì bị SIGKILL; offset không được commit, message bị xử lý lại hàng loạt ở instance khác sau mỗi lần deploy.
+- **Nguyên nhân:** Ứng dụng cần 75 giây để draining nhưng manifest chỉ cho tổng thời gian ân hạn mặc định ngắn hơn nhiều, nên Kubernetes giết cứng trước khi draining kịp hoàn tất.
+- **Fix:** Đặt `terminationGracePeriodSeconds` lớn hơn tổng `preStop` cộng ngân sách draining cộng đệm, và diễn tập đo thời gian tắt thật của pod trước khi kết luận cấu hình đã đúng.
+
+### 2. Không có preStop nên request vẫn bay vào pod đang tắt
+
+- **Triệu chứng:** Mỗi lần rolling update xuất hiện một ít lỗi kết nối bị từ chối ở phía client dù ứng dụng đã bật tắt từ tốn.
+- **Nguyên nhân:** Pod bị rút khỏi danh sách đầu cuối không tức thời; request mới vẫn được định tuyến tới pod trong khoảng lan truyền, đúng lúc máy chủ bắt đầu từ chối kết nối mới.
+- **Fix:** Thêm hook `preStop` chờ ngắn để quá trình rút đầu cuối kịp lan truyền trước khi SIGTERM tới, đồng thời tính thời gian chờ này vào ngân sách ân hạn tổng.
+
+### 3. Entrypoint qua shell khiến SIGTERM không tới được Java
+
+- **Triệu chứng:** Ứng dụng không hề ghi log tắt máy; pod luôn bị giết cứng ở cuối thời gian ân hạn trong mọi lần xóa.
+- **Nguyên nhân:** Tiến trình chính của container là shell bao quanh Java (xem bài Dockerfile); SIGTERM của Kubernetes gửi tới shell và không được chuyển tiếp đúng cách tới tiến trình Java.
+- **Fix:** Dùng entrypoint dạng exec gọi thẳng Java để Java là tiến trình chính nhận trực tiếp tín hiệu; kiểm chứng bằng log tắt máy xuất hiện trong mỗi lần diễn tập xóa pod.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Tính ngân sách:** Nova Loyalty cần `preStop` chờ 10 giây, draining consumer 75 giây và đệm an toàn 15 giây. Giá trị tối thiểu hợp lý cho `terminationGracePeriodSeconds` là bao nhiêu? Điều gì xảy ra nếu ai đó đặt giá trị này là 75?
+2. **Đọc manifest trả lời:** Trong `deployment-crm-consumer.yaml` ở mục Code, thứ tự diễn ra của `preStop`, SIGTERM và SIGKILL là gì? Khoảng thời gian nào là giới hạn cứng tuyệt đối và vì sao?
+3. **Thiết kế tắt cho HTTP service:** Áp cùng khung tư duy cho service điểm có HTTP: request dài nhất hợp lệ mất 20 giây, thời gian chờ lan truyền đầu cuối là 8 giây. Đề xuất bộ ba cấu hình (preStop, thời gian chờ tắt theo giai đoạn, `terminationGracePeriodSeconds`) kèm phép tính.
+4. **Kế hoạch diễn tập:** Viết kế hoạch diễn tập tắt pod cho consumer CRM: các bước thực hiện, số liệu cần đo (thời gian từ xóa pod tới thoát hẳn, số message bị xử lý lại) và tiêu chí đạt/không đạt.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Kubernetes — Termination of Pods: https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination
+- Kubernetes — Container Lifecycle Hooks: https://kubernetes.io/docs/concepts/containers/container-lifecycle-hooks/
+- Spring Boot — Graceful Shutdown: https://docs.spring.io/spring-boot/reference/web/graceful-shutdown.html
+
+## Đọc thêm
+
+Không có.

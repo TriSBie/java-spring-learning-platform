@@ -1,0 +1,186 @@
+---
+title: "Versioning và rollback — Phát hành có đường lui"
+module: 12
+level: "Senior"
+duration: 55
+order: 4
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Kafka 3.8"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Áp dụng được semantic versioning cho service và image của Nova Loyalty, phân biệt rõ phiên bản API, phiên bản artifact và tag image.
+- Thực thi được rollback ở tầng Kubernetes bằng cơ chế quay về revision trước và bằng cách ghim lại digest của image đã biết là tốt.
+- Giải thích được vì sao rollback của database là bài toán khác hẳn rollback của ứng dụng, và thiết kế được một đợt phát hành có đường lui thật ở cả ba tầng.
+
+## Vì sao cần biết
+
+Mọi đợt phát hành của Nova Loyalty đều mang một xác suất thất bại khác không: một lỗi chỉ lộ ra dưới tải thật, một migration tương thích chưa trọn vẹn, hoặc một cấu hình production khác staging ở điểm không ai ngờ tới. Khi sự cố xảy ra lúc nửa đêm giữa đợt khuyến mãi, câu hỏi duy nhất quan trọng là: quay lại trạng thái tốt gần nhất trong bao lâu và bằng thao tác đã được diễn tập hay bằng sự ứng biến. Versioning kỷ luật (biết chính xác production đang chạy artifact nào) cộng với chiến lược rollback đã chuẩn bị trước là thứ biến một sự cố nghiêm trọng thành một thao tác vận hành bình tĩnh. Đây là năng lực Senior vì nó đòi hỏi tư duy đồng thời ở cả ba tầng: ứng dụng, hạ tầng và dữ liệu.
+
+## Nội dung chính
+
+### Semantic versioning cho service và artifact
+
+Semantic versioning dùng ba thành phần: số lớn (major) tăng khi có thay đổi phá vỡ tính tương thích, số nhỏ (minor) tăng khi thêm tính năng tương thích ngược, và số vá (patch) tăng khi chỉ sửa lỗi tương thích ngược. Áp vào bối cảnh của Nova Loyalty cần tách bạch ba khái niệm hay bị trộn làm một:
+
+- Phiên bản API: hợp đồng mà đối tác và các service khác phụ thuộc vào, ví dụ họ tiền tố `/v4/*` hiện tại của gateway.
+- Phiên bản artifact/service: phiên bản của chính service theo semantic versioning, dùng làm tag phát hành cho image.
+- Định danh build: mã commit và digest của image, trả lời câu hỏi "chính xác thì production đang chạy cái gì" ở mức không thể tranh cãi.
+
+Nhãn trôi nổi dùng cho tiện lợi ở môi trường phát triển không bao giờ được là định danh duy nhất của một bản production: hai thời điểm khác nhau, cùng một nhãn có thể là hai nội dung khác nhau.
+
+<Mermaid chart={`flowchart TB
+  Release[Bản phát hành mới] --> Check{Kiểm chứng sau triển khai đạt?}
+  Check -->|đạt| Keep[Giữ bản mới<br/>ghi lại digest và version]
+  Check -->|không đạt| RB[Rollback]
+  RB --> AppRB[Ứng dụng: quay về revision/digest trước]
+  RB --> DBCheck{Dữ liệu có thay đổi phá vỡ?}
+  DBCheck -->|không| Done[Trạng thái tốt gần nhất]
+  DBCheck -->|có| FixFwd[Sửa tiến bằng migration mới<br/>hoặc quy trình khôi phục dữ liệu]
+  AppRB --> Done`} label="Cây quyết định rollback của Nova Loyalty: ứng dụng quay lui dễ dàng, dữ liệu phải đánh giá riêng và thường sửa tiến." />
+
+### Ai được quyền quyết định rollback và dựa trên tín hiệu nào
+
+Rollback nhanh không chỉ là vấn đề kỹ thuật: cần thỏa thuận trước ai là người có quyền ra quyết định
+quay lui trong lúc sự cố, và quyết định đó dựa trên những tín hiệu khách quan nào — ví dụ tỷ lệ lỗi
+vượt một ngưỡng đã định trong một cửa sổ quan sát, hoặc các kiểm chứng nghiệp vụ cốt lõi thất bại.
+Nếu quyền quyết định không rõ ràng, team sẽ mất thời gian quý giá để leo thang phê duyệt trong lúc
+người dùng đang chịu ảnh hưởng; nếu tín hiệu không được định nghĩa trước, quyết định sẽ bị chi phối
+bởi cảm tính và những tiếng nói lớn nhất trong phòng sự cố.
+Ngưỡng kích hoạt, cửa sổ quan sát và người quyết định phải nằm trong chính biên bản phát hành của đợt,
+viết trước khi triển khai chứ không phải thương lượng giữa sự cố.
+
+### Rollback ở tầng Kubernetes
+
+Kubernetes Deployment giữ lại lịch sử các revision của pod template. Khi một bản triển khai mới gây sự cố, thao tác quay về revision trước sẽ đưa các pod về đúng image và cấu hình của revision đó. Hai điểm kỷ luật phải nhớ: lịch sử revision hữu hạn nên cần giữ đủ số revision cho cửa sổ quan sát của team; và việc quay lui chỉ an toàn khi bản cũ tương thích với trạng thái dữ liệu hiện tại — cầu nối tới mục database bên dưới.
+
+Cách chắc chắn hơn ở tầng định danh là triển khai bằng digest của image thay vì chỉ bằng tag: khi rollback, ghim lại đúng digest của bản đã biết là tốt. Tag có thể bị trỏ lại bởi một lần build sau; digest thì không.
+
+### Rollback database: bài toán không có nút bấm
+
+Ứng dụng là không trạng thái nên quay lui gần như tức thì; database mang trạng thái tích lũy nên không tồn tại thao tác "hoàn tác phát hành" tổng quát. Ba sự thật phải nội tâm hóa:
+
+- Phần lớn migration không có chiều ngược tự động an toàn, đặc biệt là các thay đổi phá vỡ hoặc các thao tác biến đổi dữ liệu.
+- Dữ liệu do bản ứng dụng mới ghi ra sau khi phát hành có thể không đọc được bởi bản ứng dụng cũ — rollback ứng dụng mù quáng có thể biến sự cố phần mềm thành sự cố dữ liệu.
+- Chiến lược thực tế là sửa tiến (fix forward): giữ ứng dụng ở bản có khả năng xử lý dữ liệu hiện tại và vá bằng một migration hoặc bản phát hành mới; chỉ khôi phục từ bản sao lưu khi mức độ hỏng dữ liệu buộc phải trả cái giá mất dữ liệu phát sinh sau điểm sao lưu.
+
+Đây chính là lý do bài Flyway trước nhấn mạnh kỷ luật tương thích hai chiều: nó mua cho bạn khả năng rollback ứng dụng một cách an toàn trong phần lớn trường hợp.
+
+### Nghiên cứu tình huống phát hành của Nova Loyalty
+
+Xét một đợt phát hành điển hình của service điểm: migration thêm cột mới cho phép rỗng chạy thành công trong pipeline, image mới được triển khai theo digest, kiểm chứng sau triển khai phát hiện tỷ lệ lỗi tăng bất thường ở luồng tra cứu điểm. Đường lui đã chuẩn bị hoạt động như sau: quay Deployment về revision trước (image cũ, đã biết tương thích với schema mới vì cột thêm vào là cộng thêm thuần túy); giữ nguyên schema vì việc dọn cột thuộc về một phát hành sau khi nguyên nhân được làm rõ; ghi lại digest của cả hai bản và đường thời gian sự cố vào biên bản. Toàn bộ thao tác không cần một quyết định kiến trúc nào lúc nửa đêm — mọi quyết định đã được đưa ra từ lúc thiết kế phát hành.
+
+Ngược lại, nếu migration của đợt này từng xóa một cột mà code cũ vẫn đọc, đường lui trên sẽ sập ngay lập tức. Chất lượng của rollback được quyết định trước khi sự cố xảy ra, không phải trong lúc sự cố.
+
+## Code
+
+Các lệnh vận hành cốt lõi cho vòng đời phát hành và rollback trên Kubernetes:
+
+```bash filename=release-rollback-commands.sh
+# Xem lịch sử revision của một Deployment trước khi quyết định quay lui
+kubectl rollout history deployment/nova-points
+
+# Quay về revision ngay trước đó
+kubectl rollout undo deployment/nova-points
+
+# Quay về một revision cụ thể đã xác định trong biên bản phát hành
+kubectl rollout undo deployment/nova-points --to-revision=7
+
+# Theo dõi tiến trình quay lui cho tới khi hoàn tất
+kubectl rollout status deployment/nova-points
+```
+
+Ghim image theo digest trong manifest để định danh bản chạy là bất biến:
+
+```yaml filename=deployment-pinned-digest.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nova-points
+spec:
+  replicas: 3
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: nova-points
+  template:
+    metadata:
+      labels:
+        app: nova-points
+    spec:
+      containers:
+        - name: points
+          # Digest là định danh bất biến của đúng image đã qua kiểm chứng.
+          # Giá trị dưới đây là dạng minh họa, thay bằng digest thật từ bước đẩy registry.
+          image: registry.example.invalid/nova/points@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          ports:
+            - containerPort: 8080
+```
+
+Biên bản phát hành tối thiểu mà pipeline và người vận hành cùng ghi lại cho mỗi đợt:
+
+```yaml filename=release-record.yml
+service: nova-points
+version: 1.4.2
+commit: "0123456789abcdef0123456789abcdef01234567"
+imageDigest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+previousVersion: 1.4.1
+previousImageDigest: "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+migrationsApplied:
+  - datasource: core
+    version: "20261022101530"
+    backwardCompatible: true
+rollbackPlan: "rollout undo to previous revision; keep schema; fix forward if data issue"
+```
+
+## Sai lầm thường gặp
+
+### 1. Triển khai production bằng nhãn trôi nổi
+
+- **Triệu chứng:** Sau một sự cố, team không trả lời được production đang chạy chính xác nội dung nào; cùng một nhãn ở hai thời điểm là hai image khác nhau.
+- **Nguyên nhân:** Dùng một nhãn chung bị ghi đè cho mọi lần build làm định danh triển khai, không ghi lại digest trong biên bản phát hành.
+- **Fix:** Mọi triển khai production bám vào digest bất biến, ghi kèm phiên bản và mã commit trong biên bản phát hành của từng đợt.
+
+### 2. Giả định rollback ứng dụng là đủ trong khi schema đã phá vỡ tương thích
+
+- **Triệu chứng:** Đã quay về bản ứng dụng cũ nhưng lỗi không giảm — bản cũ không đọc nổi dữ liệu hoặc schema sau migration.
+- **Nguyên nhân:** Thiết kế phát hành cho phép thay đổi phá vỡ đi cùng đợt với code mới, phá vỡ điều kiện tiên quyết của việc quay lui ứng dụng.
+- **Fix:** Kỷ luật tương thích hai chiều cho mọi migration (xem bài Flyway trong pipeline); thay đổi phá vỡ tách thành nhiều đợt phát hành và việc dọn dẹp schema cũ chỉ làm sau khi bản cũ đã rời khỏi production hoàn toàn.
+
+### 3. Chưa từng diễn tập rollback nên thao tác thật lúng túng
+
+- **Triệu chứng:** Lúc sự cố thật, người trực không biết revision hiện tại, không chắc lệnh quay lui, và mất nhiều thời gian xác minh quyền truy cập.
+- **Nguyên nhân:** Rollback chỉ tồn tại trên giấy; không có biên bản phát hành chuẩn và không có buổi diễn tập định kỳ trên môi trường giống production.
+- **Fix:** Chuẩn hóa biên bản phát hành có sẵn trường đường lui cho từng đợt, và diễn tập thao tác quay lui định kỳ như một phần của quy trình vận hành bình thường.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Phân loại phiên bản:** Cho 4 thay đổi của Nova Loyalty (sửa lỗi tính tròn điểm; thêm trường tùy chọn vào phản hồi API; bỏ một trường khỏi phản hồi API mà đối tác đang dùng; đổi nội bộ thuật toán không đổi hợp đồng), xác định mỗi thay đổi thuộc mức major, minor hay patch kèm lý do.
+2. **Đọc code trả lời:** Trong `release-record.yml` ở mục Code, tại sao cả digest hiện tại và digest trước đó đều phải được ghi? Nếu chỉ ghi tag phiên bản thì kịch bản nào sẽ làm biên bản này vô dụng?
+3. **Thiết kế đường lui:** Thiết kế đường lui hoàn chỉnh cho một đợt phát hành gồm: một migration cộng thêm thuần túy, một thay đổi cấu hình qua ConfigMap, và một image mới. Mỗi tầng một thao tác quay lui cụ thể và một điều kiện kích hoạt quyết định quay lui.
+4. **Kịch bản không quay lui được:** Viết một tình huống phát hành mà rollback ứng dụng là lựa chọn sai, giải thích cơ chế dữ liệu khiến nó sai, và đề xuất chiến lược sửa tiến chi tiết cho tình huống đó.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Kubernetes — Deployments, rolling back a Deployment: https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#rolling-back-a-deployment
+- Kubernetes — Deployments: https://kubernetes.io/docs/concepts/workloads/controllers/deployment/
+- GitHub Docs — Working with the Container registry: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry
+
+## Đọc thêm
+
+Không có.

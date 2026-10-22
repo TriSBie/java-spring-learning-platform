@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Đọc được waterfall của một trace và chỉ ra đường tới hạn cùng span bất thường.",
+    "Inject và extract được ngữ cảnh W3C qua header của Kafka record.",
+    "Giải thích được vì sao biên bất đồng bộ là nơi trace dễ đứt nhất và cách phòng ngừa.",
+    "Tương quan được log, metric và trace bằng cùng định danh truy vết.",
+    "Chọn được chính sách lấy mẫu giữ lại các hành trình chậm bất thường.",
+    "Thiết kế được lan truyền ngữ cảnh cho đường Outbox của Nova Loyalty kèm đánh đổi rõ ràng."
+  ],
+  "quiz": [
+    {
+      "question": "Span trong tracing là gì?",
+      "options": [
+        "Một dòng log có cấu trúc",
+        "Một đoạn công việc có tên, thời lượng và thuộc tính, nằm trong cây quan hệ cha con của một trace",
+        "Một chuỗi thời gian trong Prometheus",
+        "Một phân vùng của Kafka topic"
+      ],
+      "answerIndex": 1,
+      "explanation": "Trace là cả hành trình, span là từng đoạn việc. Waterfall của các span cho thấy thời gian cháy ở đâu và theo quan hệ nhân quả nào."
+    },
+    {
+      "question": "Ngữ cảnh truy vết qua Kafka được mang theo bằng thành phần nào của record?",
+      "options": [
+        "Key của record",
+        "Tên topic",
+        "Header của record theo chuẩn lan truyền W3C",
+        "Offset của record"
+      ],
+      "answerIndex": 2,
+      "explanation": "Header là carrier chuẩn cho ngữ cảnh khi đi qua hệ nhắn tin: producer inject, consumer extract để nối đúng cây trace."
+    },
+    {
+      "question": "Điều gì xảy ra nếu consumer bỏ qua bước extract ngữ cảnh?",
+      "options": [
+        "Consumer mở một trace mới rời rạc, hành trình bị đứt tại biên bất đồng bộ",
+        "Trace vẫn nối đúng nhờ offset",
+        "Kafka tự nối trace",
+        "Span của producer bị xóa"
+      ],
+      "answerIndex": 0,
+      "explanation": "Không extract thì không có span cha để nối. Đứt trace tại biên hàng đợi là lỗi triển khai phổ biến nhất của tracing phân tán."
+    },
+    {
+      "question": "Đường tới hạn của một trace là gì?",
+      "options": [
+        "Chuỗi span có tên dài nhất",
+        "Span ở tầng database",
+        "Mọi span lá cộng lại",
+        "Chuỗi span quyết định tổng thời lượng của hành trình, nơi tối ưu mới có tác dụng thật"
+      ],
+      "answerIndex": 3,
+      "explanation": "Tối ưu ngoài đường tới hạn không rút ngắn trải nghiệm đầu-cuối. Waterfall giúp tập trung đúng chuỗi quyết định đó."
+    },
+    {
+      "question": "Vì sao đường Outbox qua Debezium làm lan truyền ngữ cảnh khó hơn đường producer trực tiếp?",
+      "options": [
+        "Vì Kafka không có header",
+        "Vì mắt xích chuyển tiếp không chạy code ứng dụng để inject, ngữ cảnh phải được lưu kèm sự kiện hoặc tái tạo có kỷ luật",
+        "Vì Debezium xóa mọi dữ liệu",
+        "Vì Outbox không dùng được tracing"
+      ],
+      "answerIndex": 1,
+      "explanation": "Debezium đọc log database và tạo record theo cấu hình. Ngữ cảnh muốn sống sót qua mắt xích này phải trở thành dữ liệu đi kèm sự kiện."
+    },
+    {
+      "question": "Thuộc tính span nên tuân thủ nguyên tắc nào về cardinality?",
+      "options": [
+        "Càng chi tiết theo từng giao dịch càng tốt cho mọi thuộc tính",
+        "Không đặt thuộc tính nào cả",
+        "Chỉ đặt thuộc tính dạng số",
+        "Giữ ở mức kiểm soát được cho các chiều phân tích, tránh biến mọi mã định danh thành chiều truy vấn chính"
+      ],
+      "answerIndex": 3,
+      "explanation": "Thuộc tính là dữ kiện của span, không phải hệ chỉ mục vô hạn. Lạm dụng cardinality cao làm hệ truy vết phình và chậm."
+    },
+    {
+      "question": "Lấy mẫu ưu tiên phần đuôi giải quyết vấn đề gì?",
+      "options": [
+        "Giảm số span trong mỗi trace",
+        "Tăng tốc độ xử lý của Kafka",
+        "Giữ lại các hành trình chậm bất thường vốn bị lấy mẫu ngẫu nhiên đều bỏ qua",
+        "Thay thế cảnh báo độ trễ"
+      ],
+      "answerIndex": 2,
+      "explanation": "Sự cố nằm ở phần đuôi. Chính sách lấy mẫu phải thiên vị giữ lại đúng những hành trình đáng điều tra nhất."
+    },
+    {
+      "question": "Vòng điều tra khép kín giữa ba trụ cột diễn ra thế nào?",
+      "options": [
+        "Từ metric thấy cửa sổ sự cố, lấy trace mẫu trong cửa sổ, rồi dùng định danh truy vết để đọc log chi tiết của đúng hành trình",
+        "Chỉ nhìn dashboard là đủ",
+        "Đọc toàn bộ log của mọi service",
+        "Chờ người dùng gửi thêm thông tin"
+      ],
+      "answerIndex": 0,
+      "explanation": "Ba trụ cột mạnh khi nối được với nhau bằng thời gian và định danh chung, thay vì là ba hệ thống rời nhau."
+    },
+    {
+      "question": "Thời gian chờ của message trong Kafka nên xuất hiện thế nào trong trace?",
+      "options": [
+        "Bỏ qua vì không thuộc service nào",
+        "Tính vào span của gateway",
+        "Là một phần thời lượng được thể hiện qua quan hệ span sản xuất và span tiêu thụ, không để biến mất khỏi bức tranh đầu-cuối",
+        "Cộng dồn vào mọi span con"
+      ],
+      "answerIndex": 2,
+      "explanation": "Nếu thời gian chờ vô hình, tổng độ trễ đầu-cuối sẽ không khớp tổng các span xử lý và đội ngũ kết luận sai về nút thắt."
+    },
+    {
+      "question": "Bằng chứng nào cho thấy lan truyền ngữ cảnh qua Kafka đã đúng?",
+      "options": [
+        "Producer gửi được message",
+        "Một trace duy nhất chứa cả span gateway, span service, span sản xuất và span tiêu thụ của CRM cho cùng một giao dịch kiểm chứng",
+        "Consumer xử lý được message",
+        "Log hai phía đều có chữ kafka"
+      ],
+      "answerIndex": 1,
+      "explanation": "Kiểm chứng đầu-cuối bằng một giao dịch thật và một cây trace liền mạch là tiêu chuẩn hoàn thành của bài toán lan truyền."
+    }
+  ]
+}
