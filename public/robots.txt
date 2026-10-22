@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://java-spring-learning-platform.vercel.app/sitemap.xml

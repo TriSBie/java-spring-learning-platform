@@ -1,0 +1,20 @@
+{
+  "name": "nova-outbox-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "core-db",
+    "database.port": "5432",
+    "database.user": "debezium",
+    "database.dbname": "nova_core",
+    "topic.prefix": "nova",
+    "table.include.list": "public.outbox_event",
+    "plugin.name": "pgoutput",
+    "transforms": "outbox",
+    "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
+    "transforms.outbox.route.by.field": "aggregate_type",
+    "transforms.outbox.route.topic.replacement": "nova.points.changed",
+    "transforms.outbox.table.field.event.key": "aggregate_id",
+    "transforms.outbox.table.field.event.payload": "payload",
+    "heartbeat.interval.ms": "5000"
+  }
+}
