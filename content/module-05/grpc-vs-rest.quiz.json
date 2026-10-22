@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "So sánh được gRPC và REST về contract, định dạng dữ liệu, streaming và khả năng gỡ lỗi.",
+    "Giải thích được protobuf dùng số trường làm danh tính và kỷ luật reserved khi xóa trường.",
+    "Nêu được bốn kiểu lời gọi của gRPC gồm unary và ba kiểu streaming.",
+    "Quyết định được giao thức theo việc client có nằm ngoài tầm kiểm soát hay không.",
+    "Đặt được deadline cho mọi lời gọi gRPC theo kỷ luật timeout chung.",
+    "Tính đủ chi phí vận hành của gRPC gồm gateway, giám sát và công cụ gỡ lỗi."
+  ],
+  "quiz": [
+    {
+      "answerIndex": 1,
+      "explanation": "gRPC định nghĩa hợp đồng bằng file .proto của Protocol Buffers và sinh stub cho cả client và server.",
+      "options": [
+        "OpenAPI dạng YAML",
+        "Protocol Buffers qua file .proto",
+        "JSON Schema viết tay",
+        "WSDL của SOAP"
+      ],
+      "question": "gRPC định nghĩa hợp đồng bằng gì?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "gRPC được thiết kế trên HTTP/2 nên dùng multiplexing và là nền cho streaming hai chiều.",
+      "options": [
+        "HTTP/1.0",
+        "TCP thuần không có HTTP",
+        "WebSocket tự chế",
+        "HTTP/2"
+      ],
+      "question": "gRPC chạy trên giao thức vận chuyển nào?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Ngoài unary, gRPC có server streaming, client streaming và bidirectional streaming ngay trong mô hình của nó.",
+      "options": [
+        "Streaming nhanh hơn luôn trong mọi trường hợp",
+        "Không cần quản lý deadline",
+        "Tự động tương thích ngược mọi thay đổi schema",
+        "Hỗ trợ streaming phía server, phía client và hai chiều ngay trong mô hình"
+      ],
+      "question": "Điểm khác biệt thật sự của gRPC so với REST cho traffic nội bộ là gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Số trường là danh tính thật trong dữ liệu nhị phân; tái dùng số đã xóa khiến client cũ diễn giải sai dữ liệu một cách âm thầm.",
+      "options": [
+        "Vì số trường bị giới hạn ở mức mười",
+        "Vì file proto sẽ không biên dịch được",
+        "Vì số trường là danh tính thật của dữ liệu, tái dùng sẽ làm client cũ đọc sai ý nghĩa",
+        "Vì trình duyệt không đọc được số trùng"
+      ],
+      "question": "Vì sao không được tái dùng số trường đã xóa trong protobuf?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Bề mặt công khai cần tính phổ quát và công cụ sẵn có của REST/JSON/OpenAPI vì người tích hợp nằm ngoài kiểm soát của team.",
+      "options": [
+        "Vì đối tác nằm ngoài tầm kiểm soát, REST phổ quát và dễ tích hợp, dễ thử hơn nhiều",
+        "Vì gRPC bị cấm dùng trên internet",
+        "Vì gateway không định tuyến được gRPC trong mọi trường hợp",
+        "Vì REST luôn nhanh hơn ở mọi tải"
+      ],
+      "question": "Vì sao API công khai cho đối tác của Nova nên giữ REST?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Dữ liệu nhị phân không đọc trực tiếp được như JSON; cần công cụ có file proto hoặc reflection để diễn giải khi gỡ lỗi và giám sát.",
+      "options": [
+        "Khó đọc trực tiếp khi gỡ lỗi, cần công cụ hiểu proto hoặc reflection",
+        "Nhị phân không đi qua được load balancer",
+        "Nhị phân luôn bị trình duyệt chặn",
+        "Nhị phân làm mất khả năng dùng TLS"
+      ],
+      "question": "Đánh đổi chính của dữ liệu nhị phân trong gRPC là gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Deadline là ngân sách thời gian của một lời gọi gRPC; thiếu nó, lời gọi có thể treo và gây quá tải dây chuyền như thiếu timeout HTTP.",
+      "options": [
+        "Deadline chỉ áp dụng cho streaming",
+        "Đúng, deadline là timeout của lời gọi gRPC và phải được đặt cho mọi lời gọi",
+        "JVM tự đặt deadline tối ưu cho mọi lời gọi",
+        "Không, gRPC không bao giờ treo"
+      ],
+      "question": "Nhận định deadline trong gRPC là tương đương timeout ở HTTP có đúng không?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Trình duyệt không có hỗ trợ tự nhiên cho gRPC gốc; bề mặt web thường cần gRPC-Web kèm lớp chuyển đổi hoặc một API REST riêng.",
+      "options": [
+        "Trình duyệt đã thay thế hoàn toàn REST bằng gRPC",
+        "Chỉ cần đổi cổng là trình duyệt gọi được",
+        "Trình duyệt gọi gRPC gốc tốt hơn REST",
+        "Cần thêm lớp chuyển đổi như gRPC-Web hoặc gateway REST vì trình duyệt không gọi gRPC gốc một cách tự nhiên"
+      ],
+      "question": "Trình duyệt web và gRPC có quan hệ thế nào?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Streaming hữu ích khi một phía cần nhận một dòng sự kiện liên tục thay vì hỏi-đáp từng lần, ví dụ cập nhật số dư theo thời gian thực nội bộ.",
+      "options": [
+        "Khi client là đối tác bên ngoài dùng trình duyệt",
+        "Khi cần thử API nhanh bằng dòng lệnh",
+        "Khi cần truyền một dòng sự kiện liên tục giữa hai service nội bộ, ví dụ cập nhật số dư theo thời gian thực",
+        "Khi hợp đồng thay đổi mỗi ngày"
+      ],
+      "question": "Khi nào streaming của gRPC thực sự đáng giá cho Nova?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Cả hai phía cần test hợp đồng và kỷ luật versioning; khác biệt nằm ở cách phát hiện vỡ, không ở việc có cần kỷ luật hay không.",
+      "options": [
+        "Cả hai đều cần test hợp đồng và kỷ luật tiến hóa schema, chỉ khác cách phát hiện lỗi",
+        "gRPC tự sửa mọi thay đổi phá vỡ",
+        "REST không bao giờ vỡ hợp đồng",
+        "Chỉ cần chọn đúng giao thức một lần là xong"
+      ],
+      "question": "Về tiến hóa hợp đồng, kết luận đúng là gì?"
+    }
+  ]
+}

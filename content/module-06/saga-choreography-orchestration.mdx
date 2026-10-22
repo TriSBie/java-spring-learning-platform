@@ -1,0 +1,208 @@
+---
+title: "Saga: choreography, orchestration và compensating transaction"
+module: 6
+level: "Senior"
+duration: 60
+order: 4
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Kafka 3.8"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Giải thích được vì sao giao dịch phân tán giữa nhiều service không thể dựa vào transaction của một database, và Saga giải quyết bài toán bằng dãy local transaction kèm compensating transaction.
+- So sánh được choreography và orchestration về điểm điều phối, khả năng quan sát, độ khớp (coupling) và chi phí khi saga lớn dần.
+- Thiết kế được saga đổi quà của Nova Loyalty với các bước, hành động bù trừ tương ứng và cách xử lý trạng thái treo ở giữa saga.
+
+## Vì sao cần biết
+
+Đổi quà ở Nova Loyalty không nằm trong một service: phải trừ điểm từ ví của khách (có tới 3 nguồn ví khác nhau), giữ chỗ phần quà trong kho quà, và ghi nhận giao dịch để đồng bộ sang CRM qua Outbox, Debezium và Kafka. Nova chạy 5 datasource HikariCP (core, gift, report, legacy, audit) và không dùng JTA, nên không tồn tại một transaction nguyên tử nào bao trọn cả ba việc trên. Nếu trừ điểm xong mà giữ chỗ quà thất bại, khách mất điểm oan; nếu giữ quà xong mà ghi nhận thất bại, kho và điểm lệch nhau. Saga là mẫu thiết kế chuẩn của ngành cho đúng bài toán này, và chọn sai biến thể của nó sẽ khiến hệ thống rất khó gỡ lỗi khi số bước tăng lên.
+
+## Nội dung chính
+
+### Saga là một dãy local transaction
+
+Một saga gồm nhiều bước, mỗi bước là một local transaction trong một service, cập nhật dữ liệu của service đó và phát ra một sự kiện hoặc lệnh kích hoạt bước tiếp theo. Không có khóa phân tán giữ lâu và không có coordinator của database đứng giữa.
+
+Khi một bước ở giữa thất bại vì lý do nghiệp vụ, saga không rollback theo nghĩa database. Nó chạy các compensating transaction: các thao tác nghiệp vụ ngược có ý nghĩa tương đương việc hoàn tác, áp dụng ngược thứ tự cho các bước đã hoàn thành. Ví dụ bù trừ của trừ điểm là cộng lại điểm kèm lý do hoàn; bù trừ của giữ chỗ quà là giải phóng chỗ đã giữ.
+
+Điều kiện tiền đề: mỗi bước phải được thiết kế để có hành động bù trừ về mặt nghiệp vụ. Các thao tác không thể bù trừ thật sự (ví dụ đã gửi một thông báo ra ngoài không thu hồi được) phải được đặt ở vị trí cuối saga hoặc được thiết kế lại.
+
+### Isolation yếu hơn và cách sống chung
+
+Saga không có isolation như transaction đơn database: giữa saga, các service khác có thể nhìn thấy trạng thái trung gian (điểm đã trừ nhưng quà chưa xác nhận). Thiết kế phải chấp nhận điều này có chủ đích:
+
+- Dùng trạng thái nghiệp vụ rõ ràng như `PENDING`, `RESERVED`, `CONFIRMED`, `CANCELLED` thay vì cố giả lập tính nguyên tử.
+- Áp dụng các biện pháp giảm thiểu như đặt bước dễ thất bại sớm, dùng khóa ngữ nghĩa ở mức nghiệp vụ, và cho phép đọc trạng thái trung gian một cách trung thực ở giao diện.
+
+### Choreography: không có điều phối trung tâm
+
+Trong choreography, mỗi service tự phản ứng với sự kiện của service trước: service điểm trừ điểm và phát sự kiện, service quà nghe sự kiện, giữ chỗ và phát sự kiện tiếp theo, và cứ thế. Khi thất bại, sự kiện thất bại lan ngược và từng service tự chạy bù trừ của mình.
+
+Ưu điểm: đơn giản khi saga ngắn, không có điểm điều phối tập trung, các service khớp lỏng qua sự kiện. Nhược điểm khi saga dài: không nơi nào nhìn thấy toàn bộ tiến trình, rất khó trả lời "saga của giao dịch này đang ở bước nào", và nguy cơ vòng lặp sự kiện hoặc phụ thuộc vòng tròn tăng dần theo số bước.
+
+### Orchestration: một điều phối viên rõ ràng
+
+Trong orchestration, một orchestrator (thường là một service hoặc một thành phần riêng) ra lệnh cho từng participant theo thứ tự, nhận kết quả, quyết định bước tiếp theo, và khi có lỗi thì ra lệnh bù trừ ngược thứ tự. Trạng thái saga được lưu tập trung nên truy vấn, giám sát và xử lý treo đều có một nơi để nhìn.
+
+Cái giá là orchestrator trở thành một thành phần phải được thiết kế cẩn thận để không biến thành nơi chứa toàn bộ logic nghiệp vụ của mọi service, và bản thân nó là một điểm cần độ tin cậy cao.
+
+Với saga đổi quà của Nova — có bước tiền thật (điểm), bước kho quà và yêu cầu truy vết mạnh cho đội chăm sóc khách hàng — orchestration thường là lựa chọn dễ vận hành hơn khi số bước và yêu cầu quan sát đã vượt mức tối thiểu.
+
+<Mermaid chart={`flowchart TD
+  A[Orchestrator bat dau saga doi qua] --> B[Lệnh tru diem]
+  B --> C{Thanh cong}
+  C -->|Co| D[Lệnh giu cho qua]
+  D --> E{Giu cho thanh cong}
+  E -->|Co| F[Ghi nhan va phat Outbox event]
+  E -->|Khong| G[Bù trừ: cong lai diem]
+  C -->|Khong| H[Ket thuc saga that bai, chua co bu tru]
+  F --> I[Saga hoan tat CONFIRMED]
+  G --> J[Saga ket thuc CANCELLED da hoan diem]
+`} label="Saga đổi quà dạng orchestration: mỗi bước thành công mới đi tiếp; thất bại ở bước sau kích hoạt bù trừ ngược cho các bước đã xong." />
+
+### Trạng thái treo và timeout của saga
+
+Bước nguy hiểm nhất không phải bước thất bại rõ ràng, mà là bước không rõ kết quả: lệnh đã gửi, response bị mất, participant có thể đã làm xong hoặc chưa. Orchestrator cần:
+
+- Timeout cho từng bước và cho toàn saga.
+- Truy vấn trạng thái (hoặc lệnh idempotent có thể gửi lại an toàn) để xác định kết quả thật trước khi quyết định bù trừ.
+- Lưu trạng thái saga bền vững (persisted saga state) để orchestrator khởi động lại vẫn tiếp tục đúng chỗ, không bắt đầu lại từ đầu.
+
+Bù trừ cho một bước thực ra chưa từng chạy có thể gây hại ngang với việc quên bù trừ, nên mọi lệnh và bù trừ đều phải idempotent (nội dung này nối với bài idempotency ngay sau đây).
+
+## Code
+
+Một orchestrator tối giản cho saga đổi quà. Trạng thái saga lưu vào datasource `core` của Nova; các lệnh gọi participant được thực hiện qua client có idempotency key theo từng bước.
+
+```java filename=RedeemGiftSagaOrchestrator.java
+package com.nova.loyalty.saga;
+
+import java.util.UUID;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
+
+@Component
+public class RedeemGiftSagaOrchestrator {
+
+    private final SagaStateRepository sagaRepository;
+    private final PointsSagaClient pointsClient;
+    private final GiftSagaClient giftClient;
+
+    public RedeemGiftSagaOrchestrator(SagaStateRepository sagaRepository,
+                                      PointsSagaClient pointsClient,
+                                      GiftSagaClient giftClient) {
+        this.sagaRepository = sagaRepository;
+        this.pointsClient = pointsClient;
+        this.giftClient = giftClient;
+    }
+
+    @Transactional(transactionManager = "coreTransactionManager")
+    public SagaState startRedeem(UUID sagaId, Long memberId, String giftCode, long pointsCost) {
+        SagaState saga = new SagaState(sagaId, memberId, giftCode, pointsCost, SagaStatus.STARTED);
+        return sagaRepository.save(saga);
+    }
+
+    public SagaState advance(UUID sagaId) {
+        SagaState saga = sagaRepository.findById(sagaId)
+                .orElseThrow(() -> new IllegalArgumentException("Saga not found: " + sagaId));
+        try {
+            if (saga.getStatus() == SagaStatus.STARTED) {
+                pointsClient.debit(saga.getSagaId(), saga.getMemberId(), saga.getPointsCost());
+                saga.markPointsDebited();
+                sagaRepository.save(saga);
+            }
+            if (saga.getStatus() == SagaStatus.POINTS_DEBITED) {
+                giftClient.reserve(saga.getSagaId(), saga.getGiftCode());
+                saga.markGiftReserved();
+                sagaRepository.save(saga);
+            }
+            if (saga.getStatus() == SagaStatus.GIFT_RESERVED) {
+                saga.markConfirmed();
+                sagaRepository.save(saga);
+            }
+            return saga;
+        } catch (StepFailedException failure) {
+            return compensate(saga);
+        }
+    }
+
+    public SagaState compensate(SagaState saga) {
+        if (saga.getStatus() == SagaStatus.GIFT_RESERVED) {
+            giftClient.release(saga.getSagaId(), saga.getGiftCode());
+            saga.markGiftReleased();
+        }
+        if (saga.getStatus() == SagaStatus.POINTS_DEBITED
+                || saga.getStatus() == SagaStatus.GIFT_RELEASED) {
+            pointsClient.creditBack(saga.getSagaId(), saga.getMemberId(), saga.getPointsCost());
+            saga.markPointsCreditedBack();
+        }
+        saga.markCancelled();
+        return sagaRepository.save(saga);
+    }
+
+    public enum SagaStatus {
+        STARTED, POINTS_DEBITED, GIFT_RESERVED, GIFT_RELEASED,
+        POINTS_CREDITED_BACK, CONFIRMED, CANCELLED
+    }
+
+    public static class StepFailedException extends RuntimeException {
+        public StepFailedException(String message) {
+            super(message);
+        }
+    }
+}
+```
+
+Mỗi participant nhận `sagaId` làm một phần của idempotency key cho bước của mình, nên việc orchestrator gọi lại một bước sau khi mất response không tạo ra lần trừ điểm thứ hai (chi tiết ở bài idempotency tiếp theo).
+
+## Sai lầm thường gặp
+
+### 1. Coi compensating transaction là rollback của database
+
+- **Triệu chứng:** Thiết kế bù trừ như thể dữ liệu quay về đúng trạng thái vật lý ban đầu, và bất ngờ khi lịch sử giao dịch vẫn còn dấu vết của cả hai chiều.
+- **Nguyên nhân:** Bù trừ là một thao tác nghiệp vụ mới có ý nghĩa ngược (hoàn điểm, giải phóng giữ chỗ), không phải việc xóa bỏ thao tác gốc khỏi lịch sử.
+- **Fix:** Thiết kế bù trừ như nghiệp vụ hạng nhất: có lý do, có trạng thái, có audit riêng, và hiển thị trung thực cho cả khách hàng lẫn đội hỗ trợ.
+
+### 2. Chọn choreography cho saga dài cần truy vết
+
+- **Triệu chứng:** Khi khách hàng khiếu nại một lần đổi quà dở dang, không ai trả lời được saga đang kẹt ở bước nào và service nào giữ trách nhiệm tiếp theo.
+- **Nguyên nhân:** Không có nơi nào lưu trạng thái toàn cục của saga; mỗi service chỉ biết phần việc của mình qua các sự kiện rời rạc.
+- **Fix:** Khi yêu cầu quan sát và truy vết cao hoặc số bước tăng lên, chuyển sang orchestration với trạng thái saga lưu tập trung.
+
+### 3. Bù trừ một bước chưa từng thành công
+
+- **Triệu chứng:** Khách được cộng lại điểm cho một lần trừ chưa bao giờ xảy ra, tạo ra điểm từ hư không.
+- **Nguyên nhân:** Khi kết quả của bước trước không rõ ràng, orchestrator vẫn bù trừ theo giả định, và lệnh của participant cũng không idempotent.
+- **Fix:** Xác định kết quả thật của bước bằng truy vấn trạng thái hoặc lệnh idempotent trước khi bù trừ; mọi lệnh và bù trừ đều mang khóa idempotency theo saga và bước.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được; trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay, không có chấm tự động.
+
+1. Thiết kế đầy đủ saga đổi quà của Nova ở cả hai biến thể choreography và orchestration: liệt kê sự kiện/lệnh, participant và bù trừ cho từng bước.
+2. Viết bảng trạng thái saga gồm các trạng thái trung gian và trạng thái cuối, kèm điều kiện chuyển đổi và hành động khi saga bị treo quá thời gian cho phép ở từng trạng thái.
+3. Chọn ba thao tác trong Nova và phân loại: thao tác nào bù trừ được hoàn toàn, thao tác nào chỉ bù trừ được một phần, thao tác nào phải đặt cuối saga vì không thu hồi được.
+4. Mô tả một kịch bản kết quả không rõ ràng (response bị mất) ở bước giữ chỗ quà và quy trình orchestrator của bạn xác định sự thật trước khi quyết định bù trừ trừ điểm.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring for Apache Kafka — Reference (nền sự kiện cho choreography): https://docs.spring.io/spring-kafka/reference/
+- Spring Framework — Transaction Management (phạm vi local transaction): https://docs.spring.io/spring-framework/reference/data-access/transaction.html
+- Apache Kafka — Documentation: https://kafka.apache.org/documentation/
+
+## Đọc thêm
+
+- Mô tả Saga pattern trên microservices.io (không chính thức — nguồn cộng đồng, dùng để tham khảo so sánh các biến thể): https://microservices.io/patterns/data/saga.html

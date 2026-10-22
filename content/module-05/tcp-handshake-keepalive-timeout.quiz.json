@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Mô tả được bắt tay ba bước SYN, SYN-ACK, ACK và vai trò của TIME_WAIT.",
+    "Giải thích được lợi ích của keep-alive và connection pool với traffic service-to-service.",
+    "Phân biệt được connect timeout, read timeout và ngân sách thời gian tổng.",
+    "Cấu hình được RestClient với factory có timeout tách bạch cho từng downstream.",
+    "Nêu được vì sao timeout của client phải nhỏ hơn timeout của gateway ở tầng trên.",
+    "Nhận diện được dấu hiệu cạn ephemeral port và cách giảm thiểu bằng tái sử dụng kết nối."
+  ],
+  "quiz": [
+    {
+      "answerIndex": 2,
+      "explanation": "Ba bước là SYN từ client, SYN-ACK từ server và ACK từ client; sau đó dữ liệu mới được truyền.",
+      "options": [
+        "GET, SYN, ACK",
+        "SYN, ACK, FIN",
+        "SYN, SYN-ACK, ACK",
+        "ACK, SYN, SYN-ACK"
+      ],
+      "question": "Thứ tự đúng của bắt tay ba bước TCP là gì?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "TIME_WAIT giúp phía chủ động đóng đảm bảo tín hiệu đóng được nhận đủ và tránh gói lạc của kết nối cũ gây nhiễu kết nối mới.",
+      "options": [
+        "Trạng thái server từ chối kết nối",
+        "Một lỗi rò rỉ bộ nhớ của kernel",
+        "Trạng thái chờ sau khi gửi request HTTP",
+        "Trạng thái phía chủ động đóng giữ lại để gói lạc không gây nhiễu và phía kia nhận đủ tín hiệu đóng"
+      ],
+      "question": "TIME_WAIT là gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Keep-alive và pool giúp tránh chi phí bắt tay TCP (và TLS) cho mọi request, giảm độ trễ và áp lực cổng.",
+      "options": [
+        "Để thay thế hoàn toàn DNS",
+        "Để trình duyệt hiển thị trang nhanh hơn",
+        "Tránh phải bắt tay lại cho mỗi request, giảm độ trễ và số kết nối ngắn hạn",
+        "Để mã hóa dữ liệu hai lần"
+      ],
+      "question": "Keep-alive và connection pool giúp ích điều gì nhất cho service gọi nhau tần suất cao?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Connect timeout giới hạn pha thiết lập kết nối TCP; read timeout giới hạn pha chờ dữ liệu sau khi kết nối đã mở.",
+      "options": [
+        "Cả hai là một, chỉ khác tên",
+        "Connect timeout là cho DNS, read timeout là cho TLS",
+        "Read timeout ngắn hơn luôn tự suy ra connect timeout",
+        "Connect timeout cho pha thiết lập kết nối, read timeout cho pha chờ dữ liệu trả về"
+      ],
+      "question": "Khác biệt giữa connect timeout và read timeout là gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Không có timeout khiến thread bị giữ vô hạn khi downstream treo, pool cạn dần và sự cố lan thành tê liệt toàn service.",
+      "options": [
+        "JVM tự đặt timeout sau một phút",
+        "Thread xử lý có thể bị giữ vô hạn khi downstream treo, làm cạn pool và tê liệt service",
+        "Client sẽ tự chuyển sang UDP",
+        "Gateway sẽ tự sửa cấu hình client"
+      ],
+      "question": "Điều gì xảy ra nếu HTTP client không đặt timeout?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Mỗi kết nối ngắn hạn đều đi qua TIME_WAIT; số lượng lớn kết nối như vậy làm cạn dải cổng tạm của phía chủ động đóng.",
+      "options": [
+        "Phía chủ động đóng tích lũy quá nhiều TIME_WAIT và cạn ephemeral port",
+        "TLS certificate hết hạn",
+        "DNS cache hết hạn",
+        "Database hết connection"
+      ],
+      "question": "Vì sao mở kết nối mới cho mọi request gây rủi ro ở tải cao?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Ngân sách lồng nhau phải giảm dần vào trong để tầng trong kết thúc trước khi tầng ngoài bỏ cuộc, tránh retry chồng và việc vô ích.",
+      "options": [
+        "Timeout của tầng trong nên nhỏ hơn timeout của gateway ở tầng ngoài",
+        "Gateway không bao giờ có timeout",
+        "Timeout càng dài càng an toàn ở mọi tầng",
+        "Mọi tầng nên dùng đúng một con số giống hệt nhau"
+      ],
+      "question": "Quan hệ đúng giữa timeout của gateway và timeout của service phía sau là gì?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "RestClient là lựa chọn đồng bộ hiện đại của Spring Framework 6, cấu hình qua request factory với timeout rõ ràng.",
+      "options": [
+        "Dùng RestClient của Spring Framework 6 và đặt timeout trên request factory",
+        "Dùng HTTP client đồng bộ cũ với cấu hình mặc định",
+        "Không dùng client nào, để framework tự đoán",
+        "Tự mở Socket thuần cho mọi lời gọi"
+      ],
+      "question": "Trong Spring Framework 6, nên dùng client đồng bộ nào và cấu hình timeout ở đâu?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Read timeout dài không chữa được lỗi ở pha kết nối; tăng nó chỉ làm thread bị giữ lâu hơn khi lỗi ở pha khác.",
+      "options": [
+        "Chắc chắn hết lỗi ngay",
+        "Không chữa được lỗi, mà còn giữ thread lâu hơn khi sự cố ở pha kết nối",
+        "Server sẽ tự mở cổng",
+        "Lỗi chuyển thành lỗi DNS"
+      ],
+      "question": "Tăng read timeout để chữa lỗi không thiết lập được kết nối sẽ ra sao?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Tách các pha DNS, connect, TLS và read trong số đo độ trễ giúp xác định đúng pha gây chậm thay vì tối ưu mò.",
+      "options": [
+        "Chỉ đo thời gian xử lý trong controller",
+        "Tách riêng các pha DNS, connect, TLS và read khi đo độ trễ",
+        "Đo bằng cảm nhận của người dùng cuối",
+        "Cộng tất cả thành một con số duy nhất"
+      ],
+      "question": "Khi điều tra một lời gọi chậm, cách đo đúng là gì?"
+    }
+  ]
+}

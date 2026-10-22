@@ -1,0 +1,123 @@
+{
+  "checklist": [
+    "Giải thích được dual-write problem và vì sao không có atomic commit giữa DB và Kafka khi không dùng XA.",
+    "Tự thiết kế được bảng outbox (id, aggregate, type, payload, timestamp) cho một nghiệp vụ mới.",
+    "Viết được service ghi business data + outbox event trong cùng một @Transactional.",
+    "Cấu hình được Debezium connector dạng JSON cho bảng outbox và nêu được ý nghĩa từng trường chính.",
+    "Viết được consumer idempotent dùng bảng dedupe trong cùng transaction với nghiệp vụ.",
+    "Nêu được chiến lược dọn dẹp outbox và cách theo dõi sức khỏe connector (heartbeat, lag).",
+    "Mô tả được quy trình draining khi SIGTERM và vai trò của grace period 75 giây ở Nova Loyalty."
+  ],
+  "quiz": [
+    {
+      "question": "Vấn đề cốt lõi của dual-write khi ghi database và publish Kafka trong cùng một luồng nghiệp vụ là gì?",
+      "options": [
+        "Kafka không hỗ trợ publish từ Spring Boot",
+        "Hai thao tác không nằm trong cùng một transaction, nên một thao tác có thể thành công còn thao tác kia thất bại, gây mất nhất quán",
+        "Database không cho phép ghi đồng thời với Kafka producer",
+        "Producer luôn gửi chậm hơn transaction commit"
+      ],
+      "answerIndex": 1,
+      "explanation": "Database transaction và Kafka broker là hai hệ thống độc lập, không có atomic commit chung (khi không dùng XA/2PC). Nếu app crash sau khi commit DB nhưng trước khi publish, sự kiện bị mất vĩnh viễn."
+    },
+    {
+      "question": "Trong Outbox pattern, sự kiện được ghi ở đâu tại thời điểm xử lý giao dịch nghiệp vụ?",
+      "options": [
+        "Gửi thẳng vào Kafka topic bằng producer",
+        "Ghi vào một bảng outbox trong cùng database và cùng transaction với dữ liệu nghiệp vụ",
+        "Ghi vào file log của application",
+        "Lưu vào bộ nhớ của một relay service riêng"
+      ],
+      "answerIndex": 1,
+      "explanation": "Điểm mấu chốt: business data và outbox event được ghi trong CÙNG một local transaction. Hoặc cả hai cùng commit, hoặc cả hai cùng rollback — không còn cửa sổ mất nhất quán."
+    },
+    {
+      "question": "Debezium đọc thay đổi từ database bằng cơ chế nào?",
+      "options": [
+        "Polling bảng outbox bằng câu SELECT định kỳ",
+        "Đọc transaction log (WAL/binlog) qua Change Data Capture (CDC)",
+        "Trigger trong database gọi HTTP tới Debezium",
+        "Spring Data repository event listener"
+      ],
+      "answerIndex": 1,
+      "explanation": "Debezium là CDC connector: nó đọc transaction log của database (ví dụ WAL của PostgreSQL với logical decoding) và biến mỗi thay đổi thành sự kiện đưa vào Kafka, độ trễ thấp và không cần polling."
+    },
+    {
+      "question": "Vì sao consumer phía CRM vẫn phải idempotent dù đã dùng Outbox + Debezium?",
+      "options": [
+        "Vì Kafka chỉ đảm bảo at-least-once trong thực tế, message có thể được deliver lại",
+        "Vì Debezium luôn gửi trùng mọi sự kiện đúng hai lần",
+        "Vì CRM không hỗ trợ transaction",
+        "Vì consumer group luôn có đúng một consumer"
+      ],
+      "answerIndex": 0,
+      "explanation": "Outbox + CDC cho at-least-once delivery: rebalance, retry hoặc crash sau khi xử lý nhưng trước khi commit offset đều khiến message bị deliver lại. Consumer phải tự dedupe, ví dụ bằng bảng processed event với khóa chính là event id."
+    },
+    {
+      "question": "Cách dedupe phổ biến và an toàn cho idempotent consumer là gì?",
+      "options": [
+        "Giữ một HashSet event id trong bộ nhớ của consumer",
+        "Insert event id vào bảng dedupe trong cùng transaction với thao tác nghiệp vụ; nếu vi phạm unique constraint thì bỏ qua message",
+        "Tắt enable.auto.commit và không commit offset nữa",
+        "Đặt max.poll.records = 1"
+      ],
+      "answerIndex": 1,
+      "explanation": "Dedupe phải bền vững qua restart và phải atomic với nghiệp vụ. Insert vào bảng dedupe (unique/primary key trên event id) trong cùng transaction là cách chuẩn; giữ trong bộ nhớ sẽ mất khi pod restart."
+    },
+    {
+      "question": "Sai lầm nào sau đây phá vỡ tính đảm bảo của Outbox pattern?",
+      "options": [
+        "Dọn dẹp các dòng outbox đã publish sau một thời gian lưu trữ",
+        "Publish thêm một message trực tiếp tới Kafka bên trong transaction nghiệp vụ \"cho nhanh\"",
+        "Đặt khóa chính của bảng outbox là UUID",
+        "Dùng aggregate id làm Kafka message key"
+      ],
+      "answerIndex": 1,
+      "explanation": "Publish trực tiếp trong transaction tái tạo đúng lỗi dual-write: message có thể tới Kafka trong khi transaction sau đó rollback, khiến downstream nhận sự kiện cho dữ liệu không hề tồn tại."
+    },
+    {
+      "question": "Để giữ thứ tự sự kiện của cùng một aggregate (ví dụ cùng một ví điểm), nên làm gì?",
+      "options": [
+        "Dùng nhiều partition và không đặt key",
+        "Dùng aggregate id làm message key để các sự kiện cùng aggregate vào cùng partition",
+        "Tăng số lượng consumer lên gấp đôi",
+        "Sắp xếp lại theo timestamp phía consumer là đủ trong mọi trường hợp"
+      ],
+      "answerIndex": 1,
+      "explanation": "Kafka chỉ đảm bảo thứ tự trong một partition. Đặt key = aggregate id (thường được cấu hình trong Debezium routing) giúp mọi sự kiện của cùng một ví vào cùng partition và được tiêu thụ theo thứ tự."
+    },
+    {
+      "question": "Khi pod nhận SIGTERM, graceful shutdown / draining đúng nghĩa là gì?",
+      "options": [
+        "Kill ngay mọi request đang xử lý để pod chết nhanh",
+        "Ngừng nhận traffic và message mới, xử lý xong phần đang dở (hoặc tới giới hạn thời gian), commit offset, rồi mới thoát",
+        "Tăng terminationGracePeriodSeconds lên vô hạn",
+        "Scale deployment về 0 ngay lập tức"
+      ],
+      "answerIndex": 1,
+      "explanation": "Draining = ngừng nhận việc mới nhưng hoàn tất việc đang dở trong giới hạn grace period (ở Nova Loyalty là 75 giây cho consumer). Spring Boot hỗ trợ qua spring.lifecycle.timeout-per-shutdown-phase và cơ chế shutdown của Kafka listener container."
+    },
+    {
+      "question": "Bảng outbox tăng trưởng không kiểm soát sẽ gây hậu quả gì và xử lý thế nào?",
+      "options": [
+        "Không có hậu quả vì Debezium tự xóa dòng sau khi đọc",
+        "Bảng phình to làm chậm query và tốn storage; cần job dọn dẹp định kỳ các dòng đã publish quá thời gian lưu trữ, kèm heartbeat/monitoring cho connector",
+        "Kafka tự động truncate bảng outbox",
+        "Chỉ cần thêm index là đủ, không cần dọn dẹp"
+      ],
+      "answerIndex": 1,
+      "explanation": "Debezium không tự xóa dữ liệu nguồn. Cần chiến lược retention: xóa/archive các dòng đã gửi sau N ngày, và theo dõi trạng thái connector để phát hiện khi CDC bị dừng."
+    },
+    {
+      "question": "Trường nào trong outbox event giúp consumer và việc truy vết (traceability) về sau?",
+      "options": [
+        "Chỉ cần payload, các trường còn lại là thừa",
+        "event id (UUID), aggregate type/id, event type, payload, timestamp và trace/correlation id nếu có",
+        "Chỉ cần timestamp",
+        "Tên của developer tạo giao dịch"
+      ],
+      "answerIndex": 1,
+      "explanation": "Event id dùng cho dedupe, aggregate id dùng làm key/thứ tự, event type để routing và versioning, payload là dữ liệu sự kiện, timestamp + correlation id phục vụ điều tra sự cố và tracing."
+    }
+  ]
+}

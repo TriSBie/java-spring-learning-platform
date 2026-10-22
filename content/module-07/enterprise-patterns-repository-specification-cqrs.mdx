@@ -1,0 +1,213 @@
+---
+title: "Repository, Specification và CQRS Nhẹ cho Báo Cáo"
+module: 7
+level: "Senior"
+duration: 60
+order: 6
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Hibernate 6.5.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Thiết kế được Repository tách rõ khỏi tầng web và service, dùng `JpaSpecificationExecutor` để tổ hợp điều kiện truy vấn động an toàn.
+- Xây dựng được ít nhất 3 Specification tái sử dụng cho báo cáo Nova Loyalty và tổ hợp chúng bằng phép logic chuẩn.
+- Thiết kế được mô hình đọc tách riêng trên datasource `report` theo CQRS nhẹ, nêu rõ cơ chế đồng bộ và độ trễ chấp nhận được.
+
+## Vì sao cần biết
+
+Nova Loyalty tách 5 datasource không dùng JTA: `core`, `gift`, `report`, `legacy` và `audit`. Báo cáo là nhóm truy vấn nặng nhất — lọc động theo đối tác, hạng thành viên, khoảng ngày — và tuyệt đối không được làm chậm ví điểm trên `core`. Kiến trúc đang chạy của Nova đặt báo cáo trên datasource `report` riêng, được đồng bộ từ dữ liệu giao dịch. Repository che giấu chi tiết truy vấn, Specification biến mỗi điều kiện lọc thành một khối lắp ghép có tên nghiệp vụ, và CQRS nhẹ tách mô hình đọc tối ưu cho báo cáo khỏi mô hình ghi tối ưu cho giao dịch. Đây là bài tổng kết Module 07 vì nó tổ hợp cả ba pattern vào một quyết định kiến trúc thật.
+
+## Nội dung chính
+
+### Vấn đề
+
+Báo cáo cần lọc động theo nhiều tiêu chí tổ hợp tùy ý.
+Viết một method repository cho mỗi tổ hợp sẽ bùng nổ số lượng method.
+Truy vấn báo cáo nặng chạy thẳng trên datasource giao dịch làm chậm nghiệp vụ điểm.
+Model ghi chuẩn hóa phục vụ giao dịch lại không tối ưu cho câu hỏi tổng hợp của báo cáo.
+
+### Giải pháp
+
+Repository đóng vai trò biên giới truy cập dữ liệu cho một aggregate hoặc một nhu cầu đọc.
+Specification đóng gói từng điều kiện thành đối tượng có tên nghiệp vụ, tổ hợp bằng các phép và, hoặc, phủ định.
+CQRS nhẹ tách đường ghi và đường đọc ở mức mô hình và datasource, không nhất thiết tách service.
+Đường đọc dùng bảng hoặc view đã biến đổi sẵn cho báo cáo trên datasource `report`.
+
+<Mermaid chart={`flowchart LR
+  W[Ghi giao dịch] --> Core[(Datasource core)]
+  Core -->|đồng bộ định kỳ hoặc CDC| Report[(Datasource report)]
+  R[Đọc báo cáo] --> Spec[Specification tổ hợp]
+  Spec --> Report`} label="CQRS nhẹ tại Nova Loyalty: ghi trên core, đọc báo cáo trên report" />
+
+Specification trong Spring Data được cài đặt qua criteria API với kiểu an toàn tương đối.
+Mỗi specification nên nhỏ, có tên theo ngôn ngữ nghiệp vụ và test được độc lập.
+Chỉ các tổ hợp thật sự xuất hiện trong sản phẩm mới cần được hỗ trợ.
+
+### Trade-off
+
+Ưu điểm là truy vấn động gọn, điều kiện tái sử dụng và đường đọc không tranh chấp với đường ghi.
+Nhược điểm là dữ liệu đọc có độ trễ đồng bộ và hệ thống thêm một pipeline cần giám sát.
+Specification lạm dụng sẽ tạo tầng trừu tượng khó lần hơn cả câu truy vấn trực tiếp.
+CQRS đầy đủ với service và event riêng là quá tay cho Nova; bản nhẹ dừng ở tách mô hình và datasource.
+
+## Code
+
+Package mẫu là `com.nova.loyalty.report`. Dependencies trong `pom.xml`: `spring-boot-starter-data-jpa`. Entity đọc nằm trên datasource `report` với transaction manager riêng, không dùng JTA.
+
+```java filename=PointsReportSpecifications.java
+package com.nova.loyalty.report;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+import java.time.Instant;
+import org.springframework.data.jpa.domain.Specification;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
+
+@Entity
+@Table(name = "points_report_entry")
+class PointsReportEntry {
+
+    @Id
+    private Long id;
+
+    @Column(name = "member_id")
+    private String memberId;
+
+    @Column(name = "partner_code")
+    private String partnerCode;
+
+    @Column(name = "member_tier")
+    private String memberTier;
+
+    @Column(name = "delta")
+    private long delta;
+
+    @Column(name = "created_at")
+    private Instant createdAt;
+
+    protected PointsReportEntry() {
+    }
+
+    public Long getId() { return id; }
+    public String getMemberId() { return memberId; }
+    public String getPartnerCode() { return partnerCode; }
+    public String getMemberTier() { return memberTier; }
+    public long getDelta() { return delta; }
+    public Instant getCreatedAt() { return createdAt; }
+}
+
+public interface PointsReportRepository
+        extends JpaRepository<PointsReportEntry, Long>, JpaSpecificationExecutor<PointsReportEntry> {
+}
+
+final class PointsReportSpecifications {
+
+    private PointsReportSpecifications() {
+    }
+
+    static Specification<PointsReportEntry> partnerIs(String partnerCode) {
+        return (root, query, cb) -> partnerCode == null
+                ? cb.conjunction()
+                : cb.equal(root.get("partnerCode"), partnerCode);
+    }
+
+    static Specification<PointsReportEntry> tierIs(String tier) {
+        return (root, query, cb) -> tier == null
+                ? cb.conjunction()
+                : cb.equal(root.get("memberTier"), tier);
+    }
+
+    static Specification<PointsReportEntry> createdBetween(Instant from, Instant to) {
+        return (root, query, cb) -> cb.between(root.get("createdAt"), from, to);
+    }
+
+    static Specification<PointsReportEntry> positiveDelta() {
+        return (root, query, cb) -> cb.greaterThan(root.get("delta"), 0L);
+    }
+}
+```
+
+```java filename=PointsReportService.java
+package com.nova.loyalty.report;
+
+import java.time.Instant;
+import java.util.List;
+import org.springframework.data.jpa.domain.Specification;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+@Service
+public class PointsReportService {
+
+    private final PointsReportRepository repository;
+
+    public PointsReportService(PointsReportRepository repository) {
+        this.repository = repository;
+    }
+
+    @Transactional(transactionManager = "reportTransactionManager", readOnly = true)
+    public List<PointsReportEntry> search(String partnerCode, String tier, Instant from, Instant to) {
+        Specification<PointsReportEntry> spec = Specification
+                .where(PointsReportSpecifications.partnerIs(partnerCode))
+                .and(PointsReportSpecifications.tierIs(tier))
+                .and(PointsReportSpecifications.createdBetween(from, to))
+                .and(PointsReportSpecifications.positiveDelta());
+        return repository.findAll(spec);
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Viết method repository riêng cho mọi tổ hợp lọc
+
+- **Triệu chứng:** Repository phình lên hàng chục method gần giống nhau, thêm một tiêu chí là thêm nhiều method mới.
+- **Nguyên nhân:** Tổ hợp điều kiện được mã hóa cứng vào tên method thay vì lắp ghép tại runtime.
+- **Fix:** Dùng Specification cho phần động và giữ method suy ra tên chỉ cho các truy vấn cố định thật sự phổ biến.
+
+### 2. Chạy báo cáo nặng trên datasource core
+
+- **Triệu chứng:** Giờ cao điểm, API cộng điểm chậm hẳn mỗi khi đội vận hành mở báo cáo lớn.
+- **Nguyên nhân:** Đường đọc và đường ghi tranh chấp cùng connection pool và cùng tài nguyên database.
+- **Fix:** Tách mô hình đọc sang datasource `report` theo CQRS nhẹ và đặt giới hạn pool, timeout riêng cho báo cáo.
+
+### 3. Quên rằng dữ liệu report có độ trễ đồng bộ
+
+- **Triệu chứng:** Vận hành kết luận giao dịch bị mất vì chưa thấy trên báo cáo dù giao dịch đã thành công.
+- **Nguyên nhân:** Mô hình đọc được đồng bộ bất đồng bộ nhưng giao diện và tài liệu không nêu rõ độ tươi của dữ liệu.
+- **Fix:** Hiển thị thời điểm đồng bộ gần nhất trên báo cáo và thống nhất cửa sổ trễ chấp nhận được với nghiệp vụ.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Thiết kế:** Vẽ kiến trúc CQRS nhẹ cho Nova Loyalty gồm đường ghi, pipeline đồng bộ, mô hình đọc và các điểm cần giám sát.
+2. **Đọc code:** Thêm một specification lọc theo kênh giao dịch qua gateway và tổ hợp nó vào service mà không sửa các specification cũ.
+3. **Viết tay:** Liệt kê 3 câu hỏi báo cáo mà mô hình đọc phẳng trả lời tốt hơn hẳn mô hình ghi chuẩn hóa, kèm lý do.
+4. **Phản biện:** Khi nào CQRS nhẹ vẫn là quá tay? Mô tả ngưỡng quy mô hoặc độ phức tạp khiến tách mô hình đọc bắt đầu có lãi.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Data JPA — Querying bằng Specification: https://docs.spring.io/spring-data/jpa/reference/jpa/specifications.html
+- Spring Data Commons — Repository Concepts: https://docs.spring.io/spring-data/commons/reference/repositories/core-concepts.html
+- Spring Framework — Transaction Management: https://docs.spring.io/spring-framework/reference/data-access/transaction.html
+
+## Đọc thêm
+
+Không có.

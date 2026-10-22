@@ -1,0 +1,180 @@
+---
+title: "Observer qua ApplicationEvent và TransactionalEventListener"
+module: 7
+level: "Middle"
+duration: 45
+order: 5
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Phát hành được sự kiện domain bằng `ApplicationEventPublisher` từ service nghiệp vụ mà không phụ thuộc trực tiếp vào listener.
+- Phân biệt được `@EventListener` thường và listener theo pha transaction, chọn đúng pha `AFTER_COMMIT` cho sự kiện audit của Nova Loyalty.
+- Thiết kế được ít nhất 2 listener độc lập cho cùng một sự kiện và nêu rõ chính sách xử lý lỗi của từng listener.
+
+## Vì sao cần biết
+
+Mỗi lần điểm thay đổi ở Nova Loyalty, nhiều việc phụ phải xảy ra: ghi audit vào datasource `audit`, cập nhật thống kê, và chuẩn bị dữ liệu đồng bộ CRM qua Outbox. Nếu service điểm gọi trực tiếp từng việc phụ, nó phình to và mọi tính năng mới lại phải sửa service lõi. Observer qua sự kiện ứng dụng tách publisher khỏi listener: service chỉ thông báo 'điểm đã thay đổi', các listener tự đăng ký xử lý phần của mình. Điểm sống còn tại Nova là thời điểm: sự kiện audit chỉ được ghi khi transaction điểm đã commit thật, nếu không hệ thống audit sẽ chứa cả những giao dịch đã rollback.
+
+## Nội dung chính
+
+### Vấn đề
+
+Service điểm ngày càng phình vì phải gọi audit, thống kê và thông báo sau mỗi giao dịch.
+Các việc phụ có mức quan trọng khác nhau nhưng bị trói chung một luồng lỗi.
+Nguy hiểm hơn, nếu ghi audit trước khi transaction kết thúc thì giao dịch rollback vẫn để lại vết audit sai.
+Thêm một việc phụ mới lại phải sửa service lõi đang ổn định.
+
+### Giải pháp
+
+Service phát hành một sự kiện bất biến mô tả điều đã xảy ra.
+Các listener đăng ký độc lập theo sự kiện, mỗi listener lo một việc phụ.
+Listener cần dữ liệu đã commit dùng biến thể theo pha transaction với pha sau commit.
+Listener cho việc phụ không quan trọng có thể chạy bất đồng bộ để không kéo dài request chính.
+
+<Mermaid chart={`sequenceDiagram
+  participant S as PointsService
+  participant P as EventPublisher
+  participant A as AuditListener AFTER_COMMIT
+  participant T as StatsListener
+  S->>P: publish PointsChangedEvent
+  Note over S: transaction commit
+  P->>A: ghi audit datasource
+  P->>T: cập nhật thống kê`} label="Sự kiện chỉ tới listener audit sau khi transaction điểm đã commit" />
+
+Mặc định listener chạy đồng bộ trên cùng thread và cùng transaction với publisher.
+Vì vậy exception của một listener đồng bộ có thể làm hỏng luồng chính.
+Cần quyết định tường minh cho từng listener: lỗi của nó có được phép chặn nghiệp vụ hay không.
+
+### Trade-off
+
+Ưu điểm là publisher không biết listener nào tồn tại, thêm việc phụ không sửa code lõi.
+Nhược điểm là luồng thực thi trở nên ẩn: đọc service không thấy hết việc sẽ xảy ra.
+Sự kiện trong tiến trình không bền vững như message qua Kafka; khi cần đảm bảo giao hàngข้าม service phải dùng Outbox.
+Pattern này hợp cho việc phụ trong cùng service, không thay thế tích hợp liên service.
+
+Trước khi chốt thiết kế sự kiện cho một tính năng mới, hãy trả lời bốn câu hỏi sau.
+
+- Sự kiện mô tả sự thật nào đã xảy ra, và dữ kiện tối thiểu listener cần là gì?
+- Listener nào phụ thuộc dữ liệu đã commit, listener nào chỉ cần biết sự việc đã được yêu cầu?
+- Lỗi của từng listener được phép ảnh hưởng tới nghiệp vụ chính tới mức nào?
+- Việc phụ này nằm trong cùng service hay thật sự cần độ bền vững liên service của Outbox?
+
+Một sự kiện được đặt tên tốt đọc như một câu khẳng định ở thì quá khứ.
+Tên sự kiện mơ hồ khiến listener phải đoán ý nghĩa và tự truy vấn thêm trạng thái hiện tại.
+Trạng thái hiện tại tại thời điểm listener chạy có thể đã khác trạng thái tại thời điểm sự kiện sinh ra.
+Đó là lý do sự kiện nên mang theo các dữ kiện quyết định mà listener cần để hành xử đúng.
+Khi dữ kiện quá lớn hoặc nhạy cảm, sự kiện mang định danh và listener truy vấn có kiểm soát.
+Quyết định này phải được ghi lại trong tài liệu thiết kế của tính năng, không để mặc cho từng developer tự chọn.
+
+Ghi nhớ nhanh khi thiết kế một sự kiện mới.
+
+- Tên sự kiện ở thì quá khứ, mô tả sự thật đã xảy ra.
+- Dữ kiện trong sự kiện đủ cho listener hành xử mà không đoán trạng thái hiện tại.
+- Pha transaction được chọn tường minh theo nhu cầu dữ liệu đã commit hay chưa.
+- Chính sách lỗi của từng listener được ghi trong tài liệu của tính năng.
+
+## Code
+
+Package mẫu là `com.nova.loyalty.points`. Dependency: `spring-boot-starter` và `spring-boot-starter-data-jpa` cho phần transaction.
+
+```java filename=PointsChangedEvent.java
+package com.nova.loyalty.points;
+
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.stereotype.Component;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.event.TransactionPhase;
+import org.springframework.transaction.event.TransactionalEventListener;
+
+public record PointsChangedEvent(String memberId, long delta, long balanceAfter, String reason) {
+}
+
+@Service
+class PointsEventService {
+
+    private final ApplicationEventPublisher publisher;
+
+    public PointsEventService(ApplicationEventPublisher publisher) {
+        this.publisher = publisher;
+    }
+
+    @Transactional(transactionManager = "coreTransactionManager")
+    public void changePoints(String memberId, long delta, String reason) {
+        long balanceAfter = delta;
+        publisher.publishEvent(new PointsChangedEvent(memberId, delta, balanceAfter, reason));
+    }
+}
+
+@Component
+class AuditPointsListener {
+
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    public void onPointsChanged(PointsChangedEvent event) {
+        System.out.println("AUDIT member=" + event.memberId() + " delta=" + event.delta());
+    }
+}
+
+@Component
+class StatsPointsListener {
+
+    @org.springframework.context.event.EventListener
+    public void onPointsChanged(PointsChangedEvent event) {
+        System.out.println("STATS member=" + event.memberId());
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Dùng EventListener thường cho audit bắt buộc sau commit
+
+- **Triệu chứng:** Audit chứa cả giao dịch đã rollback do lỗi ở bước sau trong cùng transaction.
+- **Nguyên nhân:** Listener thường chạy ngay khi sự kiện được phát hành, trước khi biết kết quả commit cuối cùng.
+- **Fix:** Dùng listener theo pha transaction với pha sau commit cho mọi ghi nhận phụ thuộc dữ liệu đã commit.
+
+### 2. Listener đồng bộ ném exception làm hỏng nghiệp vụ chính
+
+- **Triệu chứng:** Cộng điểm thất bại chỉ vì thống kê phụ bị lỗi.
+- **Nguyên nhân:** Listener đồng bộ mặc định chạy trong luồng của publisher và exception lan ngược lên.
+- **Fix:** Xác định listener nào được phép chặn nghiệp vụ; listener phụ phải tự bắt lỗi hoặc chạy bất đồng bộ có giám sát.
+
+### 3. Dùng sự kiện trong tiến trình thay cho Outbox khi cần giao hàng bền vững
+
+- **Triệu chứng:** Tắt tiến trình giữa chừng làm mất thông báo sang CRM mà không có dấu vết.
+- **Nguyên nhân:** Sự kiện ứng dụng chỉ sống trong bộ nhớ của tiến trình, không có cơ chế phát lại.
+- **Fix:** Việc phụ trong cùng service dùng sự kiện; tích hợp liên service phải ghi Outbox trong cùng transaction rồi chuyển tiếp qua Kafka.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Thiết kế:** Liệt kê 4 việc phụ sau giao dịch điểm tại Nova Loyalty và phân loại: việc nào cần sau commit, việc nào được phép bất đồng bộ.
+2. **Đọc code:** Điều gì xảy ra với `StatsPointsListener` khi transaction rollback? So sánh với listener audit và giải thích khác biệt.
+3. **Viết tay:** Thêm một listener gửi cảnh báo khi delta âm vượt ngưỡng lớn, kèm chính sách lỗi không chặn nghiệp vụ.
+4. **Phản biện:** Vì sao không nên thay toàn bộ sự kiện nội bộ bằng Kafka? Nêu chi phí vận hành và độ trễ của mỗi lựa chọn.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Framework — Application Events: https://docs.spring.io/spring-framework/reference/core/beans/context-introduction.html
+- Spring Framework — Transaction-bound Events: https://docs.spring.io/spring-framework/reference/data-access/transaction/event.html
+- Spring Boot — Reference Documentation: https://docs.spring.io/spring-boot/reference/
+
+## Đọc thêm
+
+Không có.

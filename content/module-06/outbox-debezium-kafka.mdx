@@ -1,0 +1,388 @@
+---
+title: "Transactional Outbox + Debezium + Kafka"
+module: 6
+level: "Middle"
+duration: 45
+order: 1
+version_pins: ["Java 21", "Spring Boot 3.3.5", "Spring Framework 6.1.x", "Spring Data JPA 3.3.x", "Hibernate 6.5.x", "Kafka 3.8", "Debezium 2.7.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Giải thích được dual-write problem và chứng minh vì sao ghi database rồi publish Kafka trong cùng một luồng nghiệp vụ sẽ mất nhất quán dữ liệu.
+- Thiết kế và cài đặt được Outbox pattern: ghi business data và outbox event trong cùng một transaction, để Debezium CDC chuyển tiếp vào Kafka.
+- Viết được một Kafka consumer idempotent dùng bảng dedupe, và mô tả được quy trình graceful shutdown / draining khi pod nhận SIGTERM.
+
+## Vì sao cần biết
+
+Ở Nova Loyalty, mọi giao dịch điểm (cộng điểm, trừ điểm, đổi quà) đều phải đồng bộ sang hệ thống CRM gần như ngay lập tức để đội chăm sóc khách hàng nhìn thấy số dư đúng. Cách làm trực giác nhất — service vừa commit transaction điểm, vừa publish một message vào Kafka — chính là dual-write: hai thao tác ghi vào hai hệ thống khác nhau mà không có một transaction chung bao ngoài. Chỉ cần process crash ở khoảng giữa hai thao tác, hoặc Kafka tạm thời không reachable đúng lúc commit xong, là CRM vĩnh viễn lệch số dư so với hệ thống điểm, và không có cơ chế nào tự phát hiện ra. Outbox pattern là cách chuẩn của ngành để đóng cửa sổ mất nhất quán này mà không cần distributed transaction (XA/2PC).
+
+## Nội dung chính
+
+### Dual-write problem
+
+Database transaction và Kafka producer là hai hệ thống độc lập. Khi code làm hai việc "lưu DB" và "gửi Kafka" nối tiếp nhau, luôn tồn tại một điểm mà một việc đã thành công còn việc kia chưa (hoặc sẽ không bao giờ) thực hiện:
+
+- Commit DB xong, app crash trước khi publish: sự kiện bị mất.
+- Publish xong, transaction DB rollback: downstream nhận sự kiện cho dữ liệu không tồn tại.
+- Publish "bên trong" transaction, trước commit: consumer đọc sự kiện rồi quay lại truy vấn DB thì chưa thấy dữ liệu.
+
+Outbox pattern giải quyết bằng cách biến "gửi sự kiện" thành "ghi thêm một dòng vào một bảng trong cùng database, trong cùng transaction". Tính atomic lúc này do chính database đảm bảo.
+
+### Thiết kế bảng outbox
+
+Bảng `outbox_event` tối thiểu cần các cột sau:
+
+| Cột | Vai trò |
+| --- | --- |
+| `id` | UUID của sự kiện, dùng làm khóa dedupe phía consumer |
+| `aggregate_type` | Loại aggregate sinh ra sự kiện, ví dụ `POINTS_WALLET` |
+| `aggregate_id` | Id của aggregate, dùng làm Kafka message key để giữ thứ tự theo aggregate |
+| `event_type` | Loại sự kiện, ví dụ `PointsChanged` |
+| `payload` | Nội dung sự kiện dạng JSON |
+| `created_at` | Thời điểm sự kiện được ghi, phục vụ truy vết và dọn dẹp |
+
+<Mermaid chart={`sequenceDiagram
+  autonumber
+  Client->>PointsService: changePoints(memberId, delta)
+  activate PointsService
+  PointsService->>DB: BEGIN transaction (core)
+  PointsService->>DB: UPDATE points_wallet (CAS / optimistic lock)
+  PointsService->>DB: INSERT outbox_event (cùng transaction)
+  PointsService->>DB: COMMIT
+  deactivate PointsService
+  Debezium->>DB: Đọc transaction log (WAL, CDC)
+  Debezium->>Kafka: Publish topic nova.points.changed (key = aggregate_id)
+  Kafka->>CrmConsumer: Deliver message (at-least-once)
+  CrmConsumer->>CrmDB: INSERT processed_event (dedupe, cùng transaction)
+  CrmConsumer->>CRM: Cập nhật số dư điểm
+  CrmConsumer->>Kafka: Commit offset`} label="Luồng Outbox tại Nova Loyalty: PointsService ghi ví điểm và outbox event trong cùng một transaction; Debezium đọc transaction log, publish vào Kafka; CRM Sync Consumer dedupe bằng bảng processed event trước khi cập nhật CRM." />
+
+### Debezium CDC đọc transaction log
+
+Debezium là một Kafka Connect connector làm Change Data Capture (CDC): thay vì polling bảng outbox bằng câu SELECT định kỳ, nó đọc transaction log của database (với PostgreSQL là WAL qua logical decoding) và biến mỗi dòng mới trong bảng outbox thành một message Kafka. Đi kèm là bộ chuyển đổi Outbox Event Router của Debezium, giúp tách các cột aggregate/event type/payload thành topic, key và value đúng chuẩn. Nhờ đọc log, độ trễ thường thấp và thứ tự thay đổi được giữ nguyên theo đúng thứ tự commit.
+
+> [!WARNING] Cần verify với docs version Debezium đang dùng thực tế: tên chính xác của các khóa cấu hình Outbox Event Router (route by field, table fields additional placement…) có thay đổi nhỏ giữa các bản 2.x; hãy đối chiếu với tài liệu của đúng bản connector được deploy trước khi áp dụng vào production.
+
+### Idempotent consumer và bảng dedupe
+
+Outbox + CDC cho bạn at-least-once delivery, không phải exactly-once ở tầng ứng dụng: khi consumer group rebalance, khi consumer crash sau khi xử lý nhưng trước khi offset được commit, message sẽ được deliver lại. Vì vậy phía CRM bắt buộc phải idempotent. Mẫu dedupe chuẩn: trước khi áp dụng nghiệp vụ, insert `event id` vào bảng `processed_event` trong cùng transaction với thao tác nghiệp vụ; nếu insert vi phạm primary key thì đây là message trùng — bỏ qua một cách an toàn.
+
+### Graceful shutdown và draining 75 giây
+
+Khi Kubernetes gửi SIGTERM, pod của CRM Sync Consumer tại Nova Loyalty có ngân sách draining là 75 giây, khớp với `terminationGracePeriodSeconds` của Deployment (chi tiết ở Module 11). Trong khoảng này, consumer phải: ngừng poll message mới, xử lý xong message đang dở, commit offset, rồi mới đóng. Spring Boot hỗ trợ phía application bằng `server.shutdown=graceful` và `spring.lifecycle.timeout-per-shutdown-phase`, còn phía Kafka listener container có cơ chế dừng listener một cách có trật tự. Nếu bỏ qua bước này, message đang xử lý dở sẽ bị deliver lại cho instance khác — lại quay về lý do consumer phải idempotent.
+
+## Code
+
+Các snippet dưới đây thuộc package `com.nova.loyalty.points`. File đầy đủ (gồm các entity phụ và cấu hình connector) nằm trong thư mục `examples/module-06/` của repo.
+
+Dependency cần thêm trong `pom.xml`:
+
+```xml filename=pom-dependencies.xml
+<dependencies>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>org.springframework.kafka</groupId>
+        <artifactId>spring-kafka</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-databind</artifactId>
+    </dependency>
+</dependencies>
+```
+
+Entity của bảng outbox:
+
+```java filename=OutboxEvent.java
+package com.nova.loyalty.points;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+import java.time.Instant;
+import java.util.UUID;
+
+@Entity
+@Table(name = "outbox_event")
+public class OutboxEvent {
+
+    @Id
+    private UUID id;
+
+    @Column(name = "aggregate_type", nullable = false, length = 64)
+    private String aggregateType;
+
+    @Column(name = "aggregate_id", nullable = false, length = 128)
+    private String aggregateId;
+
+    @Column(name = "event_type", nullable = false, length = 64)
+    private String eventType;
+
+    @Column(name = "payload", nullable = false, columnDefinition = "TEXT")
+    private String payload;
+
+    @Column(name = "created_at", nullable = false)
+    private Instant createdAt;
+
+    protected OutboxEvent() {
+    }
+
+    public OutboxEvent(UUID id, String aggregateType, String aggregateId, String eventType, String payload) {
+        this.id = id;
+        this.aggregateType = aggregateType;
+        this.aggregateId = aggregateId;
+        this.eventType = eventType;
+        this.payload = payload;
+        this.createdAt = Instant.now();
+    }
+
+    public UUID getId() {
+        return id;
+    }
+
+    public String getAggregateType() {
+        return aggregateType;
+    }
+
+    public String getAggregateId() {
+        return aggregateId;
+    }
+
+    public String getEventType() {
+        return eventType;
+    }
+
+    public String getPayload() {
+        return payload;
+    }
+
+    public Instant getCreatedAt() {
+        return createdAt;
+    }
+}
+```
+
+Repository tương ứng — chỉ cần CRUD cơ bản của Spring Data:
+
+```java filename=OutboxEventRepository.java
+package com.nova.loyalty.points;
+
+import java.time.Instant;
+import java.util.UUID;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+
+public interface OutboxEventRepository extends JpaRepository<OutboxEvent, UUID> {
+
+    @Modifying
+    @Query("delete from OutboxEvent e where e.createdAt < :cutoff")
+    int deletePublishedBefore(@Param("cutoff") Instant cutoff);
+}
+```
+
+Service nghiệp vụ: cập nhật số dư ví (CAS qua optimistic locking trên entity `PointsWallet`) và ghi outbox event trong CÙNG một transaction trên `coreTransactionManager` (Nova Loyalty có nhiều datasource, không dùng JTA — xem Module 03):
+
+```java filename=PointsService.java
+package com.nova.loyalty.points;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.UUID;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+@Service
+public class PointsService {
+
+    private final PointsWalletRepository walletRepository;
+    private final OutboxEventRepository outboxRepository;
+    private final ObjectMapper objectMapper;
+
+    public PointsService(PointsWalletRepository walletRepository,
+                         OutboxEventRepository outboxRepository,
+                         ObjectMapper objectMapper) {
+        this.walletRepository = walletRepository;
+        this.outboxRepository = outboxRepository;
+        this.objectMapper = objectMapper;
+    }
+
+    @Transactional(transactionManager = "coreTransactionManager")
+    public PointsWallet changePoints(Long memberId, long delta, String reason) {
+        PointsWallet wallet = walletRepository.findByMemberId(memberId)
+                .orElseThrow(() -> new IllegalArgumentException("Wallet not found for member " + memberId));
+        wallet.applyDelta(delta);
+        PointsWallet saved = walletRepository.save(wallet);
+
+        UUID eventId = UUID.randomUUID();
+        PointsChangedPayload payload = new PointsChangedPayload(
+                eventId.toString(), memberId, delta, saved.getBalance(), reason);
+        OutboxEvent event = new OutboxEvent(
+                eventId,
+                "POINTS_WALLET",
+                String.valueOf(memberId),
+                "PointsChanged",
+                toJson(payload));
+        outboxRepository.save(event);
+        return saved;
+    }
+
+    private String toJson(PointsChangedPayload payload) {
+        try {
+            return objectMapper.writeValueAsString(payload);
+        } catch (JsonProcessingException ex) {
+            throw new IllegalStateException("Cannot serialize outbox payload", ex);
+        }
+    }
+}
+```
+
+Consumer phía CRM: dedupe bằng bảng `processed_event` trong cùng transaction với thao tác cập nhật CRM:
+
+```java filename=CrmSyncConsumer.java
+package com.nova.loyalty.crm;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.UUID;
+import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
+
+@Component
+public class CrmSyncConsumer {
+
+    private static final Logger log = LoggerFactory.getLogger(CrmSyncConsumer.class);
+
+    private final ProcessedEventRepository processedRepository;
+    private final CrmClient crmClient;
+    private final ObjectMapper objectMapper;
+
+    public CrmSyncConsumer(ProcessedEventRepository processedRepository,
+                           CrmClient crmClient,
+                           ObjectMapper objectMapper) {
+        this.processedRepository = processedRepository;
+        this.crmClient = crmClient;
+        this.objectMapper = objectMapper;
+    }
+
+    @KafkaListener(topics = "nova.points.changed", groupId = "crm-sync")
+    @Transactional(transactionManager = "crmTransactionManager")
+    public void onPointsChanged(String messageJson) {
+        CrmPointsEvent event = parse(messageJson);
+        try {
+            processedRepository.saveAndFlush(new ProcessedEvent(event.eventId()));
+        } catch (DataIntegrityViolationException duplicate) {
+            log.info("Duplicate event {} ignored", event.eventId());
+            return;
+        }
+        crmClient.upsertPoints(event.memberId(), event.balanceAfter());
+    }
+
+    private CrmPointsEvent parse(String json) {
+        try {
+            return objectMapper.readValue(json, CrmPointsEvent.class);
+        } catch (JsonProcessingException ex) {
+            throw new IllegalArgumentException("Invalid PointsChanged payload", ex);
+        }
+    }
+
+    public record CrmPointsEvent(UUID eventId, Long memberId, long delta, long balanceAfter, String reason) {
+    }
+}
+```
+
+Cấu hình Debezium connector (đăng ký qua Kafka Connect REST API). Lưu ý `transforms.outbox.type` là Outbox Event Router của Debezium, và khóa `table.field.event.key` quyết định message key lấy từ `aggregate_id` để giữ thứ tự theo từng ví:
+
+```json filename=debezium-outbox-connector.json
+{
+  "name": "nova-outbox-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "core-db",
+    "database.port": "5432",
+    "database.user": "debezium",
+    "database.dbname": "nova_core",
+    "topic.prefix": "nova",
+    "table.include.list": "public.outbox_event",
+    "plugin.name": "pgoutput",
+    "transforms": "outbox",
+    "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
+    "transforms.outbox.route.by.field": "aggregate_type",
+    "transforms.outbox.route.topic.replacement": "nova.points.changed",
+    "transforms.outbox.table.field.event.key": "aggregate_id",
+    "transforms.outbox.table.field.event.payload": "payload",
+    "heartbeat.interval.ms": "5000"
+  }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Dual-write không có outbox
+
+- **Triệu chứng:** CRM thỉnh thoảng lệch số dư so với hệ thống điểm, không tái hiện được ở môi trường test.
+- **Nguyên nhân:** Service commit DB rồi mới publish Kafka (hoặc ngược lại); crash hoặc sự cố mạng ở giữa hai thao tác làm mất một phía.
+- **Fix:** Ghi sự kiện vào bảng outbox trong cùng transaction với dữ liệu nghiệp vụ; để CDC chuyển tiếp.
+
+### 2. Publish vào Kafka bên trong transaction, trước commit
+
+- **Triệu chứng:** Consumer nhận sự kiện nhưng truy vấn ngược về DB thì chưa thấy giao dịch; hoặc giao dịch rollback nhưng CRM đã cộng điểm.
+- **Nguyên nhân:** Message rời khỏi hệ thống trước khi transaction có kết quả cuối cùng, phá vỡ nguyên tắc "chỉ công bố những gì đã commit".
+- **Fix:** Tuyệt đối không gọi producer trong luồng nghiệp vụ; sự kiện chỉ rời DB qua transaction log sau khi đã commit.
+
+### 3. Consumer không idempotent
+
+- **Triệu chứng:** Sau mỗi lần deploy hoặc rebalance, một số khách hàng bị cộng/trừ điểm hai lần ở CRM.
+- **Nguyên nhân:** Kafka deliver at-least-once, message bị xử lý lại, nhưng consumer áp dụng nghiệp vụ vô điều kiện.
+- **Fix:** Dedupe bằng bảng `processed_event` với primary key là event id, insert trong cùng transaction với thao tác nghiệp vụ.
+
+### 4. Bảng outbox không bao giờ được dọn và connector chết lặng lẽ
+
+- **Triệu chứng:** Bảng outbox phình lên hàng chục triệu dòng làm chậm mọi query; hoặc sự kiện ngừng chảy sang CRM nhiều giờ mà không ai biết.
+- **Nguyên nhân:** Debezium không tự xóa dữ liệu nguồn; connector dừng (lỗi quyền, WAL bị giữ, schema thay đổi) mà không có heartbeat/monitoring.
+- **Fix:** Job dọn dẹp định kỳ xóa dòng đã publish quá hạn lưu trữ (dùng `deletePublishedBefore` ở repository trên), bật `heartbeat.interval.ms`, và đặt cảnh báo khi connector task không ở trạng thái RUNNING hoặc độ trễ CDC tăng bất thường.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay (viết, vẽ sơ đồ, đọc code) — không có chấm tự động.
+
+1. **Vẽ sơ đồ:** Vẽ lại luồng Outbox của Nova Loyalty trên giấy, đánh dấu chính xác vị trí mà tính atomic được đảm bảo và vị trí chỉ còn at-least-once. Giải thích bằng 3–4 câu vì sao hai vùng này khác nhau.
+2. **Đọc code trả lời:** Đọc `PointsService` ở mục Code và trả lời: nếu `outboxRepository.save(event)` ném exception thì điều gì xảy ra với số dư ví? Nếu `crmClient.upsertPoints` ném exception thì điều gì xảy ra với dòng trong `processed_event`?
+3. **Viết tay thiết kế:** Thiết kế bảng outbox và payload cho sự kiện "đổi quà thành công" (gift redemption) của Nova Loyalty: chọn aggregate type/id, event type, các trường payload, và nêu lý do chọn message key.
+4. **Kịch bản sự cố:** Consumer đang xử lý một message thì pod nhận SIGTERM. Viết trình tự sự kiện theo thời gian (timeline) cho hai trường hợp: có draining đúng và kill ngay lập tức; nêu khác biệt về offset commit và khả năng xử lý trùng ở mỗi trường hợp.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Framework — Transaction Management: https://docs.spring.io/spring-framework/reference/data-access/transaction.html
+- Spring for Apache Kafka — Reference Documentation: https://docs.spring.io/spring-kafka/reference/
+- Apache Kafka — Documentation (delivery semantics, consumer groups): https://kafka.apache.org/documentation/
+- Debezium — Documentation, Outbox Event Router: https://debezium.io/documentation/reference/stable/transformations/outbox-event-router.html
+- Spring Boot — Graceful Shutdown: https://docs.spring.io/spring-boot/reference/web/graceful-shutdown.html
+
+## Đọc thêm
+
+- Bài viết phân tích Outbox pattern trên microservices.io (không chính thức — nguồn cộng đồng, dùng để tham khảo góc nhìn tổng quan): https://microservices.io/patterns/data/transactional-outbox.html

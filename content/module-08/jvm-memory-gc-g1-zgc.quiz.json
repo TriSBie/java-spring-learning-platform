@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Vẽ và giải thích được đầy đủ các vùng bộ nhớ của tiến trình Java trong container.",
+    "So sánh được G1 và ZGC theo pause, throughput, chi phí nền và quy mô heap.",
+    "Bật và đọc được GC log, nhận diện được pause dài và dấu hiệu thiếu heap.",
+    "Nêu được vì sao tham số pause mục tiêu của G1 là gợi ý chứ không phải cam kết.",
+    "Trình bày được quy trình tự đo trước và sau khi đổi GC trên workload thật.",
+    "Chọn và bảo vệ được GC cho từng loại service của Nova Loyalty."
+  ],
+  "quiz": [
+    {
+      "question": "Vùng bộ nhớ nào chứa metadata của class trong JVM hiện đại?",
+      "options": [
+        "Heap vùng trẻ",
+        "Metaspace nằm ngoài heap",
+        "Stack của main thread",
+        "Direct buffer"
+      ],
+      "answerIndex": 1,
+      "explanation": "Metaspace nằm ở native memory, ngoài heap. Quên vùng này là nguyên nhân phổ biến khi tính toán bộ nhớ container."
+    },
+    {
+      "question": "Triết lý cốt lõi của ZGC là gì?",
+      "options": [
+        "Dừng toàn bộ ứng dụng lâu để dọn thật sạch",
+        "Không bao giờ thu gom vùng già",
+        "Thực hiện phần lớn công việc thu gom đồng thời với ứng dụng, đổi CPU nền lấy pause cực ngắn",
+        "Chỉ thu gom khi heap đầy hoàn toàn"
+      ],
+      "answerIndex": 2,
+      "explanation": "ZGC đánh đổi tài nguyên nền để pause không tỉ lệ với kích thước heap, phù hợp heap lớn và yêu cầu pause cực thấp thật sự."
+    },
+    {
+      "question": "Tham số pause mục tiêu của G1 nên được hiểu thế nào?",
+      "options": [
+        "Gợi ý để bộ thu gom cân đối công việc, kết quả thật phải đo bằng GC log trên tải thật",
+        "Cam kết cứng cho mọi chu kỳ thu gom",
+        "Thông số chỉ có ý nghĩa khi debug",
+        "Giá trị càng nhỏ càng tốt trong mọi trường hợp"
+      ],
+      "answerIndex": 0,
+      "explanation": "Đặt mục tiêu quá tham vọng làm tăng chi phí thu gom mà không đảm bảo đạt được. Mọi con số đều tùy môi trường và phải tự đo."
+    },
+    {
+      "question": "Tiến trình bị container kill dù heap chưa đầy, vùng nào có thể là thủ phạm?",
+      "options": [
+        "Chỉ có thể là heap",
+        "Không vùng nào, đó là lỗi hệ điều hành",
+        "Bộ nhớ của tiến trình khác",
+        "Direct memory, metaspace, stack nhiều thread hoặc native memory vượt phần còn lại của giới hạn"
+      ],
+      "answerIndex": 3,
+      "explanation": "Giới hạn container áp lên tổng bộ nhớ tiến trình. Giám sát chỉ heap sẽ mù trước các vùng ngoài heap."
+    },
+    {
+      "question": "G1 chia heap thành các region nhằm mục đích gì?",
+      "options": [
+        "Để dùng nhiều tiến trình hơn",
+        "Để thu gom có chọn lọc các vùng nhiều rác trước, cân bằng pause và throughput",
+        "Để thay thế hoàn toàn vùng già",
+        "Để tắt thu gom vùng trẻ"
+      ],
+      "answerIndex": 1,
+      "explanation": "Region cho phép G1 ưu tiên dọn nơi có giá trị thu hồi cao nhất trong ngân sách pause đã chọn."
+    },
+    {
+      "question": "Khi nào ZGC thường KHÔNG phải lựa chọn tốt?",
+      "options": [
+        "Heap lớn và yêu cầu pause cực thấp",
+        "Khi đã đo và thấy G1 không đạt yêu cầu pause",
+        "Khi dùng Java 21",
+        "Service nhỏ, máy ít CPU, yêu cầu độ trễ ở mức thông thường"
+      ],
+      "answerIndex": 3,
+      "explanation": "Chi phí CPU nền của ZGC cần được bù bởi lợi ích pause. Service nhỏ với yêu cầu thông thường thường tốt hơn với G1."
+    },
+    {
+      "question": "Tín hiệu nào trong GC log đáng báo động nhất?",
+      "options": [
+        "Một chu kỳ thu gom vùng trẻ đơn lẻ",
+        "GC log có nhiều dòng",
+        "Pause tăng dần theo thời gian kèm thu gom vùng già liên tục mà heap sau thu gom không hạ",
+        "Heap dùng đúng dung lượng đã cấp"
+      ],
+      "answerIndex": 2,
+      "explanation": "Mẫu hình đó gợi ý rò rỉ hoặc sức chứa không đủ: rác thật sự sống ngày càng nhiều chứ không phải dao động tải bình thường."
+    },
+    {
+      "question": "Cách đúng để quyết định đổi GC cho production là gì?",
+      "options": [
+        "Đặt giả thuyết, đo trước và sau trên cùng kịch bản tải thật bằng GC log và JFR, có phương án quay lui",
+        "Sao chép cấu hình của hệ thống nổi tiếng",
+        "Đổi ngay trên production và chờ phản hồi người dùng",
+        "Chỉ dựa vào benchmark tổng hợp trên internet"
+      ],
+      "answerIndex": 0,
+      "explanation": "Hiệu năng GC phụ thuộc workload và phần cứng cụ thể. Không có con số vay mượn nào thay được đo đạc trên hệ thống của mình."
+    },
+    {
+      "question": "Virtual thread của Java 21 thay đổi điều gì về bộ nhớ?",
+      "options": [
+        "Làm heap không cần thu gom nữa",
+        "Xóa bỏ metaspace",
+        "Giảm mạnh chi phí stack cho workload nhiều kết nối chờ I/O, nhưng không đổi bản chất heap và các vùng khác",
+        "Tự động tăng giới hạn container"
+      ],
+      "answerIndex": 2,
+      "explanation": "Virtual thread giải quyết bài toán thread chờ, không phải bài toán object sống trong heap hay direct buffer."
+    },
+    {
+      "question": "Vì sao GC log nên ghi ra file riêng với rotation?",
+      "options": [
+        "Để log trông chuyên nghiệp hơn",
+        "Để phân tích chuỗi thời gian quanh sự cố mà không làm phình log ứng dụng và không mất dữ liệu cũ quá nhanh",
+        "Vì JVM bắt buộc",
+        "Để tắt log ứng dụng"
+      ],
+      "answerIndex": 1,
+      "explanation": "GC log là dữ liệu chẩn đoán theo thời gian: tách file và rotation hợp lý giúp điều tra sự cố độ trễ đuôi hiệu quả."
+    }
+  ]
+}

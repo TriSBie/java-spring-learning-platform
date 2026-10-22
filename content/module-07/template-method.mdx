@@ -1,0 +1,198 @@
+---
+title: "Template Method cho Import File Đối Tác"
+module: 7
+level: "Junior"
+duration: 40
+order: 2
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Mô tả được khung thuật toán cố định của một quy trình import file và xác định đúng các bước biến thiên cần mở cho subclass.
+- Cài đặt được abstract class với method khung là `final` và ít nhất 2 hook method có cài đặt mặc định hợp lý.
+- Áp dụng được pattern cho 2 định dạng file đối tác của Nova Loyalty mà không lặp lại logic đọc, validate và ghi log.
+
+## Vì sao cần biết
+
+Nova Loyalty nhận file điểm từ nhiều đối tác qua gateway nội bộ: file CSV của đối tác bán lẻ, file text định dạng cố định của đối tác ngân hàng. Mọi file đều phải đi qua cùng một khung: kiểm tra header, đọc từng dòng, validate, áp dụng điểm, ghi kết quả và tổng kết lỗi — nhưng cách parse từng dòng thì khác nhau theo đối tác. Sao chép toàn bộ quy trình cho mỗi đối tác khiến một thay đổi ở bước ghi log phải sửa ở nhiều nơi. Template Method khóa khung chung trong class cha và chỉ mở đúng các bước khác biệt cho class con.
+
+## Nội dung chính
+
+### Vấn đề
+
+Mỗi đối tác gửi file điểm theo định dạng riêng.
+Tuy nhiên 80 phần trăm quy trình là giống nhau: mở file, kiểm tra header, lặp dòng, validate, tổng kết.
+Nếu mỗi đối tác có một class import độc lập hoàn toàn, logic chung bị sao chép.
+Khi quy định ghi log thay đổi, cả team phải sửa nhiều class giống nhau và dễ sót.
+
+### Giải pháp
+
+Class cha trừu tượng định nghĩa method khung chứa toàn bộ trình tự bước.
+Method khung được khai báo `final` để subclass không phá vỡ trình tự.
+Các bước khác nhau theo đối tác được khai báo trừu tượng hoặc hook có mặc định.
+Subclass chỉ cài đặt phần parse và validate đặc thù của mình.
+
+<Mermaid chart={`flowchart TD
+  A[Bắt đầu import] --> B[Kiểm tra header]
+  B --> C[Đọc và parse từng dòng - subclass]
+  C --> D[Validate dòng - hook]
+  D --> E[Áp dụng điểm]
+  E --> F[Tổng kết và ghi log]`} label="Template Method: khung cố định, bước parse do subclass cài đặt" />
+
+Hook method là điểm cân bằng tinh tế.
+Hook có cài đặt mặc định rỗng hoặc hợp lý giúp subclass chỉ ghi đè khi cần.
+Ngược lại, bước bắt buộc phải khác nhau thì nên là abstract để compiler ép cài đặt.
+
+### Trade-off
+
+Ưu điểm là loại bỏ trùng lặp khung và đảm bảo mọi đối tác tuân thủ cùng trình tự.
+Nhược điểm là kế thừa cứng: subclass gắn chặt với class cha, khó kết hợp nhiều biến thể.
+Khi số bước biến thiên tăng lên nhiều, nên cân nhắc chuyển sang Strategy và composition.
+Pattern này hợp nhất khi khung ổn định và biến thể chỉ khác ở vài bước rõ ràng.
+
+## Code
+
+Package mẫu là `com.nova.loyalty.importer`. Chỉ dùng thư viện chuẩn Java 21 và Spring stereotype.
+
+```java filename=AbstractPartnerFileImporter.java
+package com.nova.loyalty.importer;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+public abstract class AbstractPartnerFileImporter {
+
+    private static final Logger log = LoggerFactory.getLogger(AbstractPartnerFileImporter.class);
+
+    public final ImportSummary importFile(InputStream input) throws IOException {
+        List<String> errors = new ArrayList<>();
+        int applied = 0;
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(input, StandardCharsets.UTF_8))) {
+            String header = reader.readLine();
+            validateHeader(header);
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                try {
+                    PointsLine parsed = parseLine(line);
+                    validateLine(parsed);
+                    applied++;
+                } catch (IllegalArgumentException ex) {
+                    errors.add(ex.getMessage());
+                }
+            }
+        }
+        ImportSummary summary = new ImportSummary(applied, List.copyOf(errors));
+        log.info("Import finished applied={} errors={}", summary.applied(), summary.errors().size());
+        return summary;
+    }
+
+    protected abstract void validateHeader(String header);
+
+    protected abstract PointsLine parseLine(String rawLine);
+
+    protected void validateLine(PointsLine line) {
+        if (line.memberId() == null || line.memberId().isBlank()) {
+            throw new IllegalArgumentException("Missing memberId");
+        }
+        if (line.delta() == 0L) {
+            throw new IllegalArgumentException("Delta must not be zero");
+        }
+    }
+
+    public record PointsLine(String memberId, long delta) {
+    }
+
+    public record ImportSummary(int applied, List<String> errors) {
+    }
+}
+```
+
+```java filename=CsvPartnerImporter.java
+package com.nova.loyalty.importer;
+
+import org.springframework.stereotype.Component;
+
+@Component
+public class CsvPartnerImporter extends AbstractPartnerFileImporter {
+
+    @Override
+    protected void validateHeader(String header) {
+        if (header == null || !header.startsWith("member_id,delta")) {
+            throw new IllegalArgumentException("Invalid CSV header: " + header);
+        }
+    }
+
+    @Override
+    protected PointsLine parseLine(String rawLine) {
+        String[] parts = rawLine.split(",");
+        if (parts.length != 2) {
+            throw new IllegalArgumentException("Invalid CSV line: " + rawLine);
+        }
+        return new PointsLine(parts[0].trim(), Long.parseLong(parts[1].trim()));
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Quên khai báo method khung là final
+
+- **Triệu chứng:** Một subclass ghi đè toàn bộ quy trình import và bỏ qua bước tổng kết lỗi.
+- **Nguyên nhân:** Method khung không được bảo vệ nên subclass tùy ý thay đổi trình tự đã chuẩn hóa.
+- **Fix:** Khai báo method khung là `final`, chỉ mở các bước con qua method protected riêng.
+
+### 2. Đẩy toàn bộ logic lên class cha
+
+- **Triệu chứng:** Thêm đối tác mới vẫn phải sửa class cha vì parse đặc thù nằm lẫn trong khung.
+- **Nguyên nhân:** Ranh giới bước chung và bước riêng không được phân tích trước khi code.
+- **Fix:** Liệt kê bảng bước chung và bước riêng cho từng đối tác trước khi viết class cha.
+
+### 3. Hook mặc định nuốt lỗi validate
+
+- **Triệu chứng:** File sai định dạng vẫn báo import thành công với 0 dòng lỗi.
+- **Nguyên nhân:** Hook validate mặc định để trống và subclass quên ghi đè bước bắt buộc.
+- **Fix:** Bước bắt buộc phải khai báo abstract; hook chỉ dùng cho hành vi tùy chọn thật sự.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Phân tích:** Với quy trình import file ngân hàng dạng độ dài cố định, liệt kê bước nào thuộc khung chung, bước nào là riêng.
+2. **Đọc code:** Vì sao `importFile` dùng try-with-resources? Điều gì xảy ra với file lớn nếu đọc toàn bộ vào bộ nhớ thay vì đọc từng dòng?
+3. **Viết tay:** Viết subclass cho định dạng phân tách bằng dấu chấm phẩy, tái sử dụng nguyên khung của class cha.
+4. **Phản biện:** So sánh Template Method với Strategy cho bài toán import: khi nào composition thắng kế thừa?
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Dev.java — Inheritance và Abstract Classes: https://dev.java/learn/inheritance/
+- Spring Framework — Core Technologies: https://docs.spring.io/spring-framework/reference/core.html
+- OpenJDK — JDK 21 Documentation: https://openjdk.org/projects/jdk/21/
+
+## Đọc thêm
+
+Không có.

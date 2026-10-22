@@ -1,0 +1,181 @@
+---
+title: "Profiling bằng JFR và async-profiler"
+module: 8
+level: "Senior"
+duration: 55
+order: 5
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Micrometer 1.13.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Khởi tạo và thu được một bản ghi JFR từ tiến trình đang chạy bằng công cụ dòng lệnh, giới hạn được thời lượng và sự kiện cần thu.
+- Đọc được flame graph: phân biệt được trục ngang là tỉ lệ mẫu, trục dọc là độ sâu stack, và lần ra được method chiếm mẫu nóng nhất.
+- Trình bày được quy trình điều tra một endpoint chậm tại Nova Loyalty từ triệu chứng, giả thuyết, thu thập bằng chứng tới xác minh sau khi sửa.
+
+## Vì sao cần biết
+
+Sự cố độ trễ của Nova Loyalty thường xuất hiện theo cơn ở giờ cao điểm và biến mất khi team bắt đầu nhìn vào — đúng loại sự cố mà log thông thường không bắt được. Endpoint tra cứu điểm qua gateway bị phàn nàn chậm từng đợt, nhưng CPU, heap và database đều trông bình thường ở mức trung bình. Đây là lúc profiling lên tiếng: JFR ghi lại sự kiện thời gian thực của JVM với chi phí thấp, còn async-profiler vẽ flame graph cho thấy thời gian thật sự cháy ở đâu trong stack. Bài này dạy quy trình lấy bằng chứng thay vì đoán mò, vì mọi kết luận hiệu năng tại Nova đều phải dựa trên số đo của chính hệ thống.
+
+## Nội dung chính
+
+### JFR: hộp đen của JVM
+
+Java Flight Recorder là cơ chế ghi sự kiện tích hợp sẵn trong JVM.
+Nó ghi lại phân bổ bộ nhớ, thu gom rác, khóa tranh chấp, I/O và nhiều sự kiện khác với chi phí thấp đủ để chạy ở production có kiểm soát.
+Một bản ghi có thể được mở đầu khi sự cố đang diễn ra và dừng sau khi bắt đủ mẫu.
+JFR đặc biệt mạnh ở khả năng tương quan nhiều loại sự kiện trên cùng một trục thời gian.
+
+Có thể khởi động bản ghi ngay từ tham số JVM cho các service quan trọng.
+Cũng có thể gắn vào tiến trình đang chạy bằng công cụ quản trị của JDK.
+Mỗi bản ghi cần đặt tên, giới hạn thời lượng và dung lượng để tránh tự gây sự cố đĩa.
+
+### async-profiler và flame graph
+
+Công cụ async-profiler lấy mẫu stack ở cả tầng Java và tầng native với chi phí thấp.
+Kết quả thường được xem dạng flame graph: mỗi ô là một method trong stack.
+Chiều ngang của ô tỉ lệ với số mẫu có mặt của stack đó, không phải thứ tự thời gian.
+Ô càng rộng càng là nơi thời gian cháy nhiều; cần đọc cả chuỗi stack phía dưới ô để hiểu ngữ cảnh gọi.
+Một method rộng không tự nó là tội đồ: có thể nó chỉ là điểm tập hợp của nhiều đường gọi hợp lệ.
+
+<Mermaid chart={`flowchart LR
+  S[Triệu chứng: endpoint chậm theo cơn] --> H[Giả thuyết có thứ tự]
+  H --> J[Thu JFR và mẫu profiler]
+  J --> F[Đọc flame graph và sự kiện khóa, GC]
+  F --> Fix[Sửa đúng điểm nóng]
+  Fix --> V[Đo lại cùng kịch bản]`} label="Quy trình điều tra hiệu năng bằng bằng chứng tại Nova Loyalty" />
+
+### Quy trình điều tra endpoint chậm của Nova
+
+Bắt đầu bằng việc khoanh vùng cửa sổ thời gian và route gateway bị ảnh hưởng.
+Liệt kê giả thuyết theo thứ tự khả năng: khóa tranh chấp, phân bổ bộ nhớ quá mức, truy vấn giữ connection, hoặc thu gom rác.
+Thu thập JFR và mẫu profiler đúng trong cửa sổ sự cố, không thu sau khi sự cố đã qua.
+Đối chiếu bằng chứng với giả thuyết, sửa đúng một điểm nóng mỗi lần, rồi đo lại cùng kịch bản.
+Nếu bằng chứng mâu thuẫn giả thuyết, quay lại bước liệt kê thay vì cố sửa theo linh cảm.
+
+Trước khi kết thúc một cuộc điều tra hiệu năng, hãy tự kiểm bằng ba câu hỏi.
+Bằng chứng thu được có thật sự nằm trong cửa sổ sự cố hay chỉ là tải nền sau sự cố?
+Điểm nóng tìm được có nằm trên đường tới hạn của request bị phàn nàn hay không?
+Số đo sau khi sửa có được thu bằng đúng kịch bản và đúng cách thu như số đo trước hay không?
+Ba câu hỏi này loại bỏ phần lớn kết luận profiling sai mà các team thường mắc phải.
+
+## Code
+
+Các lệnh dưới đây chạy trên máy chủ hoặc trong container có JDK 21 đầy đủ. Bản ghi JFR và file flame graph là bằng chứng điều tra, cần lưu kèm bối cảnh thời gian và phiên bản triển khai.
+
+```bash filename=jfr-commands.sh
+# Liet ke tien trinh Java dang chay
+jcmd
+
+# Bat dau ghi JFR 120 giay cho tien trinh co pid cho truoc
+jcmd <pid> JFR.start name=nova-investigation duration=120s filename=/tmp/nova.jfr settings=profile
+
+# Kiem tra ban ghi dang chay va dung som khi da du bang chung
+jcmd <pid> JFR.check
+jcmd <pid> JFR.stop name=nova-investigation
+
+# Tom tat nhanh su kien trong file ghi
+jfr summary /tmp/nova.jfr
+jfr print --events jdk.ExecutionSample /tmp/nova.jfr | head -100
+```
+
+```bash filename=async-profiler.sh
+# Lay mau CPU 30 giay va xuat flame graph dang html
+./profiler.sh -d 30 -e cpu -f /tmp/nova-flame.html <pid>
+
+# Lay mau phan bo bo nho khi nghi van ap luc phan bo cao
+./profiler.sh -d 30 -e alloc -f /tmp/nova-alloc.html <pid>
+```
+
+```java filename=SlowEndpointSimulation.java
+package com.nova.loyalty.perf;
+
+import java.util.concurrent.locks.ReentrantLock;
+
+public class SlowEndpointSimulation {
+
+    private final ReentrantLock lock = new ReentrantLock();
+
+    public long lookupPoints(String memberId) {
+        lock.lock();
+        try {
+            long checksum = 0L;
+            for (int i = 0; i < 50_000; i++) {
+                checksum += (memberId.hashCode() + i) % 97L;
+            }
+            return checksum;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public static void main(String[] args) throws InterruptedException {
+        SlowEndpointSimulation simulation = new SlowEndpointSimulation();
+        Thread[] threads = new Thread[8];
+        for (int t = 0; t < threads.length; t++) {
+            threads[t] = new Thread(() -> {
+                for (int i = 0; i < 200; i++) {
+                    simulation.lookupPoints("member-" + i);
+                }
+            });
+            threads[t].start();
+        }
+        for (Thread thread : threads) {
+            thread.join();
+        }
+        System.out.println("done");
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Đoán điểm nóng rồi sửa ngay không thu thập bằng chứng
+
+- **Triệu chứng:** Sau nhiều lần sửa, độ trễ vẫn nguyên vẹn và team không biết lần sửa nào có tác dụng thật.
+- **Nguyên nhân:** Điểm nóng trong tưởng tượng hiếm khi trùng điểm nóng trong mẫu thực tế của production.
+- **Fix:** Luôn thu JFR hoặc mẫu profiler trong cửa sổ sự cố trước khi sửa, và đo lại cùng kịch bản sau khi sửa.
+
+### 2. Đọc flame graph như biểu đồ thời gian
+
+- **Triệu chứng:** Kết luận sai rằng method ở phía bên phải xảy ra sau method ở phía bên trái.
+- **Nguyên nhân:** Trục ngang của flame graph là tỉ lệ mẫu của stack, không phải trục thời gian.
+- **Fix:** Đọc chiều rộng để tìm nơi cháy thời gian và đọc chuỗi stack dọc để hiểu ngữ cảnh; dùng JFR khi cần trục thời gian.
+
+### 3. Thu thập mẫu ngoài cửa sổ sự cố
+
+- **Triệu chứng:** Báo cáo profiling chỉ ra các method hoàn toàn bình thường và kết luận không có vấn đề.
+- **Nguyên nhân:** Sự cố theo cơn đã qua trước khi việc thu thập bắt đầu, mẫu chỉ còn tải nền.
+- **Fix:** Kích hoạt thu thập tự động theo cảnh báo độ trễ hoặc giữ bản ghi vòng tròn để bắt đúng khoảnh khắc sự cố.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Thực hành:** Chạy chương trình mô phỏng với nhiều thread, thu mẫu bằng công cụ có sẵn và chỉ ra stack nào chiếm tỉ lệ mẫu lớn nhất kèm giải thích.
+2. **Đọc flame graph:** Cho một flame graph mẫu tự tạo, viết đoạn phân tích 5 câu: điểm nóng, ngữ cảnh stack, giả thuyết nguyên nhân, bước kiểm chứng tiếp theo.
+3. **Quy trình:** Viết runbook một trang cho sự cố endpoint chậm theo cơn tại Nova, từ khoanh vùng route gateway tới tiêu chí đóng sự cố.
+4. **Phản biện:** Vì sao một method chiếm nhiều mẫu chưa chắc là nơi cần tối ưu? Nêu hai tình huống method rộng nhưng vô tội.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- OpenJDK — JDK Flight Recorder: https://openjdk.org/jeps/328
+- Dev.java — Monitoring và chẩn đoán JVM: https://dev.java/learn/jvm/
+- Micrometer — Documentation: https://micrometer.io/docs
+
+## Đọc thêm
+
+Không có.

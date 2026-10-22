@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Giải thích được saga là dãy local transaction kèm compensating transaction, không phải distributed transaction.",
+    "So sánh được choreography và orchestration về điều phối, quan sát và coupling.",
+    "Thiết kế được saga đổi quà với bước, bù trừ và trạng thái trung gian rõ ràng.",
+    "Nêu được hệ quả của isolation yếu và cách dùng trạng thái nghiệp vụ để sống chung với nó.",
+    "Xử lý được ca kết quả không rõ ràng bằng idempotency và truy vấn trạng thái trước khi bù trừ.",
+    "Lưu được trạng thái saga bền vững để orchestrator khởi động lại vẫn tiếp tục đúng chỗ."
+  ],
+  "quiz": [
+    {
+      "answerIndex": 0,
+      "explanation": "Saga là dãy local transaction; khi một bước thất bại, các bước đã xong được hoàn tác về mặt nghiệp vụ bằng compensating transaction.",
+      "options": [
+        "Dãy local transaction, khi lỗi thì chạy compensating transaction cho các bước đã hoàn thành",
+        "Một transaction database duy nhất bao nhiều service",
+        "Cơ chế sao lưu dữ liệu giữa các service",
+        "Một loại khóa phân tán của Kafka"
+      ],
+      "question": "Saga giải quyết giao dịch đa service bằng cách nào?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Bù trừ là một thao tác nghiệp vụ mới có ý nghĩa ngược (hoàn điểm), có audit riêng, không xóa lịch sử của thao tác gốc.",
+      "options": [
+        "Chạy lại đúng câu SQL ngược do database tự sinh",
+        "Hoàn tác ở tầng Kafka bằng cách xóa message",
+        "Xóa vật lý dòng dữ liệu của bước gốc",
+        "Một thao tác nghiệp vụ mới có ý nghĩa ngược với bước gốc, có trạng thái và audit riêng"
+      ],
+      "question": "Compensating transaction là gì?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Choreography không có điều phối trung tâm; mỗi service phản ứng với sự kiện của bước trước và tự lo bù trừ của mình.",
+      "options": [
+        "Sai, choreography luôn có một orchestrator ẩn",
+        "Choreography không cần sự kiện hay lệnh",
+        "Choreography chỉ khác ở tên gọi của orchestrator",
+        "Đúng, các service phản ứng theo sự kiện, không có orchestrator trung tâm"
+      ],
+      "question": "Nhận định về choreography có đúng không?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Orchestration lưu trạng thái tập trung nên truy vấn tiến trình và xử lý treo có một nơi rõ ràng để nhìn và can thiệp.",
+      "options": [
+        "Vì nó dùng ít service hơn hẳn",
+        "Vì nó có một nơi lưu trạng thái toàn cục của saga để truy vấn, giám sát và tiếp tục sau khi khởi động lại",
+        "Vì nó tự động có isolation như transaction đơn",
+        "Vì nó không cần lưu trạng thái"
+      ],
+      "question": "Vì sao orchestration dễ quan sát hơn khi saga dài?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Saga không khóa dữ liệu trong suốt quá trình, nên trạng thái trung gian như điểm đã trừ nhưng quà chưa xác nhận là có thể nhìn thấy.",
+      "options": [
+        "Chỉ orchestrator mới thấy dữ liệu của saga",
+        "Các service khác có thể nhìn thấy trạng thái trung gian của saga, phải thiết kế trạng thái nghiệp vụ rõ ràng để sống chung",
+        "Trạng thái trung gian không bao giờ tồn tại",
+        "Saga có isolation mạnh hơn transaction đơn database"
+      ],
+      "question": "Hệ quả isolation yếu của saga là gì?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Thao tác không thu hồi được phải là bước cuối hoặc được thiết kế lại, nếu không saga không có cách hoàn tác khi bước sau nó thất bại.",
+      "options": [
+        "Đặt ở cuối saga hoặc thiết kế lại, vì không có bù trừ thật sự cho nó",
+        "Chia nhỏ nó ra mọi bước",
+        "Đặt ở bước đầu tiên để chắc chắn nó chạy",
+        "Bỏ qua, saga tự xử lý được mọi thao tác"
+      ],
+      "question": "Thao tác không thể bù trừ nên được đặt ở đâu trong saga?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Khi kết quả không rõ, phải xác định sự thật bằng truy vấn trạng thái hoặc lệnh idempotent gửi lại an toàn trước khi bù trừ.",
+      "options": [
+        "Sai, hủy toàn bộ saga và bắt khách làm lại",
+        "Không cần làm gì vì timeout tự giải quyết",
+        "Đúng, cần truy vấn trạng thái hoặc lệnh idempotent để biết bước đã chạy hay chưa trước khi bù trừ",
+        "Sai, cứ bù trừ ngay cho an toàn"
+      ],
+      "question": "Nhận định xử lý bước không rõ kết quả có đúng không?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Thứ tự bù trừ phải ngược thứ tự thực thi để gỡ các phụ thuộc theo chiều ngược lại, như giải phóng quà trước khi hoàn điểm tùy thiết kế bước.",
+      "options": [
+        "Thứ tự bất kỳ, không quan trọng",
+        "Chỉ bù trừ bước cuối cùng",
+        "Ngược thứ tự thực thi của các bước đã hoàn thành",
+        "Cùng thứ tự với thứ tự thực thi"
+      ],
+      "question": "Bù trừ nên chạy theo thứ tự nào?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Khóa theo saga và bước giúp gửi lại lệnh an toàn: bước đã chạy sẽ cho kết quả cũ thay vì chạy lần hai.",
+      "options": [
+        "Để log đẹp hơn",
+        "Để Kafka tự sắp xếp thứ tự",
+        "Để lệnh và bù trừ của từng bước được idempotent, gửi lại không gây tác dụng lần hai",
+        "Để giảm kích thước message"
+      ],
+      "question": "Vì sao lệnh của participant cần idempotency key theo saga và bước?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Nova không dùng JTA và có nhiều datasource độc lập nên không tồn tại transaction nguyên tử bao trọn các service/datasource đó.",
+      "options": [
+        "Vì điểm là dữ liệu quá nhạy cảm",
+        "Vì các bước nằm ở các service và datasource khác nhau, Nova không dùng JTA nên không có transaction nguyên tử chung",
+        "Vì Kafka không hỗ trợ transaction nào cả",
+        "Vì Spring không có annotation transaction"
+      ],
+      "question": "Vì sao Nova không dùng một transaction phân tán kiểu XA cho đổi quà?"
+    }
+  ]
+}

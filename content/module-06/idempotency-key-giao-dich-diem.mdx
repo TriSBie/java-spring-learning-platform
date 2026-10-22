@@ -1,0 +1,314 @@
+---
+title: "Idempotency key cho giao dịch điểm: unique constraint, stored response và CAS"
+module: 6
+level: "Middle"
+duration: 50
+order: 5
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Spring Data JPA 3.3.x", "Kafka 3.8"]
+updated: "2026-10-22"
+---
+## Mục tiêu
+
+- Giải thích được idempotency ở tầng API và tầng dữ liệu, và vì sao retry của client, gateway và Kafka consumer đều buộc giao dịch điểm của Nova phải idempotent.
+- Thiết kế được cơ chế idempotency key hoàn chỉnh: client sinh key, server lưu key kèm stored response bằng unique constraint, và request trùng nhận lại đúng response gốc.
+- Cài đặt được cập nhật số dư an toàn cho ví điểm gồm 3 nguồn bằng CAS (compare-and-swap) qua cột version, không làm mất cập nhật khi hai request chạy đồng thời.
+## Vì sao cần biết
+
+Ở Nova Loyalty, một lần trừ điểm có thể bị yêu cầu lại từ nhiều phía: ứng dụng khách retry khi mạng chập chờn, gateway thử lại sau timeout, và chính khách hàng bấm nút hai lần. Nếu mỗi lần thử lại đều trừ điểm thật, khách mất điểm oan và đội hỗ trợ không cách nào phân biệt được đâu là giao dịch thật đâu là bản sao của cùng một ý định. Điểm của Nova lại không nằm ở một chỗ: một ví tổng hợp từ 3 nguồn điểm khác nhau (ví dụ điểm mua hàng, điểm khuyến mãi và điểm đối tác), việc trừ phải trừ đúng theo thứ tự ưu tiên và không được trừ một phần rồi dừng. Idempotency key cộng với CAS là bộ đôi biến thao tác nguy hiểm này thành thao tác gửi lại an toàn.
+## Nội dung chính
+
+### Idempotent nghĩa là gì
+
+Một thao tác là idempotent khi thực hiện nó một lần hay nhiều lần với cùng một đầu vào danh tính đều cho cùng một kết quả cuối cùng về trạng thái. Điểm tinh tế nằm ở cụm "cùng một danh tính": hệ thống cần một khóa để nhận biết các lần gửi là cùng một ý định hay là hai ý định khác nhau. Khóa đó là idempotency key.
+
+Không có key, server không phân biệt được "khách bấm lại vì lần đầu tưởng lỗi" với "khách thật sự muốn trừ điểm lần thứ hai" — hai tình huống trông giống hệt nhau ở tầng request.
+
+### Thiết kế idempotency key
+
+Thiết kế chuẩn cho API thay đổi trạng thái:
+
+- Client sinh một key duy nhất cho mỗi ý định nghiệp vụ (thường là UUID) và gửi kèm mọi lần thử lại của cùng ý định đó, qua header như `Idempotency-Key` hoặc một trường trong body.
+- Server lưu một bản ghi gồm key, dấu vân tay của request (hash của các tham số chính), trạng thái xử lý, response đã trả và thời điểm tạo, vào một bảng riêng như `idempotency_record`.
+- Cột key có unique constraint. Request đầu tiên insert được bản ghi và xử lý thật; các request trùng va vào unique constraint thì không xử lý lại, mà chờ hoặc đọc lại stored response để trả đúng kết quả gốc.
+- Nếu cùng một key nhưng dấu vân tay request khác nhau, đó là lỗi dùng sai key của client: trả lỗi rõ ràng thay vì trả stored response của một ý định khác.
+- Bản ghi có thời hạn lưu trữ (retention) phù hợp cửa sổ retry thực tế, sau đó được dọn dẹp theo lịch.
+
+Stored response là phần hay bị làm thiếu: chỉ dedupe ở tầng trạng thái mà không lưu response sẽ khiến request trùng nhận một kết quả khác (ví dụ số dư mới nhất thay vì số dư tại thời điểm giao dịch gốc), làm hỏng khả năng đối soát của client.
+
+<Mermaid chart={`flowchart TD
+  A[Request kem Idempotency-Key] --> B{Key da co trong bang chua}
+  B -->|Chua co| C[Insert ban ghi - xu ly that trong transaction]
+  C --> D[Luu stored response kem key]
+  D --> E[Tra response goc]
+  B -->|Da co va fingerprint khop| F[Khong xu ly lai]
+  F --> G[Tra lai stored response]
+  B -->|Da co nhung fingerprint khac| H[Tra loi dung sai key]
+`} label="Luồng idempotency: unique constraint quyết định ai được xử lý thật; các lần trùng chỉ nhận lại stored response của ý định gốc." />
+
+### Trừ điểm từ 3 nguồn ví bằng CAS
+
+Ví tổng của khách gồm số dư của 3 nguồn. Khi trừ một lượng điểm, server phải quyết định trừ bao nhiêu từ mỗi nguồn theo thứ tự ưu tiên (ví dụ dùng điểm sắp hết hạn trước) và cập nhật cả 3 trong cùng một local transaction của datasource `core`.
+
+Đồng thời, hai request khác nhau có thể cùng đọc một số dư và cùng tính phần trừ, rồi cùng ghi đè và làm mất một lần cập nhật (lost update). CAS giải quyết ở tầng dữ liệu: mỗi ví có cột `version`; câu cập nhật chỉ thành công nếu version trong database vẫn bằng version đã đọc. Nếu không khớp, tức đã có cập nhật khác chen vào, transaction phải đọc lại và tính lại, hoặc trả xung đột có kiểm soát. Trong JPA, cột này được đánh dấu bằng annotation `@Version` để framework tự kiểm tra (optimistic locking), và cũng có thể viết câu cập nhật CAS tường minh khi cần kiểm soát chặt.
+
+### Idempotency ở các tầng khác nhau
+
+Cùng một nguyên tắc xuất hiện ở nhiều tầng của Nova: API nhận giao dịch điểm dedupe bằng idempotency key; Kafka consumer phía CRM dedupe bằng event id trong bảng processed (xem bài Outbox); lệnh của participant trong saga dedupe bằng khóa theo saga và bước (xem bài Saga). Thiết kế tốt dùng chung một tư duy và một bộ quy ước đặt key cho cả ba tầng.
+## Code
+
+Entity của bản ghi idempotency và ví điểm với `@Version`. Ví điểm nằm trên datasource `core`, một trong 5 datasource của Nova.
+
+```java filename=IdempotencyRecord.java
+package com.nova.loyalty.points;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+import java.time.Instant;
+
+@Entity
+@Table(name = "idempotency_record")
+public class IdempotencyRecord {
+
+    @Id
+    @Column(name = "idempotency_key", length = 128)
+    private String idempotencyKey;
+
+    @Column(name = "request_fingerprint", nullable = false, length = 128)
+    private String requestFingerprint;
+
+    @Column(name = "response_body", columnDefinition = "TEXT")
+    private String responseBody;
+
+    @Column(name = "response_status")
+    private Integer responseStatus;
+
+    @Column(name = "created_at", nullable = false)
+    private Instant createdAt;
+
+    protected IdempotencyRecord() {
+    }
+
+    public IdempotencyRecord(String idempotencyKey, String requestFingerprint) {
+        this.idempotencyKey = idempotencyKey;
+        this.requestFingerprint = requestFingerprint;
+        this.createdAt = Instant.now();
+    }
+
+    public void complete(int status, String body) {
+        this.responseStatus = status;
+        this.responseBody = body;
+    }
+
+    public String getRequestFingerprint() {
+        return requestFingerprint;
+    }
+
+    public String getResponseBody() {
+        return responseBody;
+    }
+
+    public Integer getResponseStatus() {
+        return responseStatus;
+    }
+}
+```
+
+```java filename=PointsWallet.java
+package com.nova.loyalty.points;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+import jakarta.persistence.Version;
+
+@Entity
+@Table(name = "points_wallet")
+public class PointsWallet {
+
+    @Id
+    private Long memberId;
+
+    @Column(name = "purchase_balance", nullable = false)
+    private long purchaseBalance;
+
+    @Column(name = "promo_balance", nullable = false)
+    private long promoBalance;
+
+    @Column(name = "partner_balance", nullable = false)
+    private long partnerBalance;
+
+    @Version
+    @Column(name = "version", nullable = false)
+    private long version;
+
+    protected PointsWallet() {
+    }
+
+    public long totalBalance() {
+        return purchaseBalance + promoBalance + partnerBalance;
+    }
+
+    public void debitByPriority(long amount) {
+        if (amount <= 0 || amount > totalBalance()) {
+            throw new IllegalArgumentException("Invalid debit amount " + amount);
+        }
+        long remaining = amount;
+        long fromPromo = Math.min(promoBalance, remaining);
+        promoBalance -= fromPromo;
+        remaining -= fromPromo;
+        long fromPurchase = Math.min(purchaseBalance, remaining);
+        purchaseBalance -= fromPurchase;
+        remaining -= fromPurchase;
+        partnerBalance -= remaining;
+    }
+
+    public Long getMemberId() {
+        return memberId;
+    }
+
+    public long getVersion() {
+        return version;
+    }
+
+    public long getPurchaseBalance() {
+        return purchaseBalance;
+    }
+
+    public long getPromoBalance() {
+        return promoBalance;
+    }
+
+    public long getPartnerBalance() {
+        return partnerBalance;
+    }
+}
+```
+
+Service xử lý giao dịch: kiểm tra key trước, xử lý thật trong một transaction, và khi gặp xung đột version thì coi đó là tín hiệu để client/tiến trình gọi thử lại toàn bộ giao dịch thay vì tự cộng trừ mò trong cùng transaction đã hỏng.
+
+```java filename=IdempotentPointsService.java
+package com.nova.loyalty.points;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+@Service
+public class IdempotentPointsService {
+
+    private final PointsWalletRepository walletRepository;
+    private final IdempotencyRecordRepository recordRepository;
+    private final ObjectMapper objectMapper;
+
+    public IdempotentPointsService(PointsWalletRepository walletRepository,
+                                   IdempotencyRecordRepository recordRepository,
+                                   ObjectMapper objectMapper) {
+        this.walletRepository = walletRepository;
+        this.recordRepository = recordRepository;
+        this.objectMapper = objectMapper;
+    }
+
+    @Transactional(transactionManager = "coreTransactionManager")
+    public DebitResult debit(String idempotencyKey, Long memberId, long amount, String fingerprint) {
+        var existing = recordRepository.findById(idempotencyKey);
+        if (existing.isPresent()) {
+            IdempotencyRecord record = existing.get();
+            if (!record.getRequestFingerprint().equals(fingerprint)) {
+                throw new IllegalArgumentException("Idempotency key reused with different request");
+            }
+            return readStored(record);
+        }
+        IdempotencyRecord record = new IdempotencyRecord(idempotencyKey, fingerprint);
+        try {
+            recordRepository.saveAndFlush(record);
+        } catch (DataIntegrityViolationException duplicate) {
+            throw new DuplicateInProgressException("Duplicate request is being processed");
+        }
+        PointsWallet wallet = walletRepository.findByMemberId(memberId)
+                .orElseThrow(() -> new IllegalArgumentException("Wallet not found"));
+        wallet.debitByPriority(amount);
+        walletRepository.saveAndFlush(wallet);
+        DebitResult result = new DebitResult(memberId, amount, wallet.totalBalance());
+        record.complete(200, toJson(result));
+        recordRepository.save(record);
+        return result;
+    }
+
+    private DebitResult readStored(IdempotencyRecord record) {
+        try {
+            return objectMapper.readValue(record.getResponseBody(), DebitResult.class);
+        } catch (JsonProcessingException ex) {
+            throw new IllegalStateException("Stored response is corrupted", ex);
+        }
+    }
+
+    private String toJson(DebitResult result) {
+        try {
+            return objectMapper.writeValueAsString(result);
+        } catch (JsonProcessingException ex) {
+            throw new IllegalStateException("Cannot serialize debit result", ex);
+        }
+    }
+
+    public record DebitResult(Long memberId, long amount, long balanceAfter) {
+    }
+
+    public static class DuplicateInProgressException extends RuntimeException {
+        public DuplicateInProgressException(String message) {
+            super(message);
+        }
+    }
+}
+```
+## Sai lầm thường gặp
+
+### 1. Dedupe bằng kiểm tra tồn tại mà không có unique constraint
+
+- **Triệu chứng:** Hai request trùng tới gần như đồng thời đều thấy key chưa tồn tại và đều trừ điểm thật.
+- **Nguyên nhân:** Mẫu check-then-act có cửa sổ đua (race condition); chỉ có ràng buộc ở tầng database mới nguyên tử.
+- **Fix:** Đặt unique constraint trên cột key và xử lý vi phạm constraint như tín hiệu dedupe, thay vì tin vào bước kiểm tra trước.
+
+### 2. Không lưu stored response
+
+- **Triệu chứng:** Request trùng không bị trừ điểm hai lần nhưng nhận số dư hoặc mã giao dịch khác lần đầu, khiến client không đối soát được.
+- **Nguyên nhân:** Chỉ lưu dấu đã xử lý mà bỏ qua việc lưu nguyên response đã trả cho ý định gốc.
+- **Fix:** Lưu response (status và body) cùng bản ghi key trong cùng transaction với thao tác nghiệp vụ và trả lại nguyên văn cho các lần trùng.
+
+### 3. Đọc-sửa-ghi ví điểm không có CAS
+
+- **Triệu chứng:** Hai giao dịch đồng thời cùng trừ trên một số dư đọc được, tổng điểm trừ thật nhỏ hơn tổng yêu cầu mà không giao dịch nào báo lỗi (lost update).
+- **Nguyên nhân:** Cập nhật không kiểm tra dữ liệu có bị thay đổi kể từ lúc đọc hay không.
+- **Fix:** Dùng cột version với cơ chế CAS (annotation `@Version` của JPA hoặc câu update có điều kiện version) và xử lý xung đột bằng việc tải lại và tính lại toàn bộ giao dịch.
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được; trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+## Workbook
+
+Các bài tập dưới đây làm bằng tay, không có chấm tự động.
+
+1. Thiết kế bảng `idempotency_record` đầy đủ cho Nova: các cột, ràng buộc, chính sách retention và job dọn dẹp; giải thích từng lựa chọn theo cửa sổ retry thực tế của client.
+2. Viết trình tự xử lý bằng lời cho bốn ca: request đầu tiên, request trùng sau khi lần đầu đã xong, request trùng trong lúc lần đầu đang chạy, và request dùng lại key với tham số khác.
+3. Cho một ví gồm 3 nguồn với số dư cụ thể, viết bảng phân bổ phần trừ theo thứ tự ưu tiên cho ba mức trừ khác nhau, gồm cả ca không đủ tổng số dư.
+4. Mô tả một kịch bản lost update trên ví điểm khi không có CAS, theo từng bước thời gian của hai transaction, rồi chỉ ra chính xác bước nào thay đổi khi có CAS bằng version.
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Data JPA — Optimistic Locking và @Version: https://docs.spring.io/spring-data/jpa/reference/jpa/locking.html
+- Spring Framework — Transaction Management: https://docs.spring.io/spring-framework/reference/data-access/transaction.html
+- Spring Boot — Data Access Reference: https://docs.spring.io/spring-boot/reference/data/sql.html
+
+## Đọc thêm
+
+Không có.

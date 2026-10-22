@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Thiết kế được Repository đúng biên giới, không lộ chi tiết truy vấn ra tầng trên.",
+    "Cài đặt và tổ hợp được Specification cho truy vấn động có nhiều tiêu chí.",
+    "Giải thích được CQRS nhẹ khác CQRS đầy đủ ở những điểm nào.",
+    "Nêu được cơ chế đồng bộ mô hình đọc và cách truyền đạt độ trễ cho người dùng báo cáo.",
+    "Chỉ định đúng transaction manager cho datasource report trong hệ nhiều datasource không JTA.",
+    "Đánh giá được khi nào Specification và CQRS nhẹ trở thành over-engineering."
+  ],
+  "quiz": [
+    {
+      "question": "Specification giải quyết vấn đề gì của repository?",
+      "options": [
+        "Tự động tạo bảng database",
+        "Đóng gói từng điều kiện lọc thành khối có tên, tổ hợp động tại runtime thay vì bùng nổ method theo tổ hợp",
+        "Thay thế hoàn toàn transaction",
+        "Mã hóa dữ liệu báo cáo"
+      ],
+      "answerIndex": 1,
+      "explanation": "Mỗi điều kiện là một specification độc lập; service tổ hợp chúng theo nhu cầu thực tế của từng truy vấn."
+    },
+    {
+      "question": "CQRS nhẹ tại Nova Loyalty tách những gì?",
+      "options": [
+        "Tách mọi service thành hai tiến trình riêng",
+        "Tách frontend khỏi backend",
+        "Tách mô hình đọc và datasource báo cáo khỏi mô hình ghi giao dịch, trong cùng hệ thống",
+        "Tách team dev thành hai team"
+      ],
+      "answerIndex": 2,
+      "explanation": "Bản nhẹ chỉ tách mô hình và nơi lưu trữ cho đường đọc, đủ để bảo vệ đường ghi mà không gánh chi phí vận hành của CQRS đầy đủ."
+    },
+    {
+      "question": "Hệ quả tất yếu của mô hình đọc đồng bộ bất đồng bộ là gì?",
+      "options": [
+        "Dữ liệu đọc có độ trễ so với dữ liệu ghi và phải được truyền đạt rõ ràng",
+        "Dữ liệu đọc luôn mới hơn dữ liệu ghi",
+        "Không thể truy vấn báo cáo theo thời gian thực trong mọi trường hợp",
+        "Transaction ghi bị rollback thường xuyên"
+      ],
+      "answerIndex": 0,
+      "explanation": "Eventual consistency ở đường đọc là cái giá của việc tách tải; cần hiển thị độ tươi dữ liệu và giám sát pipeline đồng bộ."
+    },
+    {
+      "question": "Vì sao báo cáo không nên dùng chung pool với datasource core?",
+      "options": [
+        "Vì báo cáo không cần connection",
+        "Vì JPA cấm dùng chung pool",
+        "Vì báo cáo chỉ chạy ban đêm",
+        "Vì truy vấn báo cáo nặng có thể chiếm hết connection và tài nguyên, làm chậm nghiệp vụ điểm"
+      ],
+      "answerIndex": 3,
+      "explanation": "Tách pool và datasource giúp đặt giới hạn riêng, bảo vệ đường ghi tới hạn khỏi tải phân tích khó dự đoán."
+    },
+    {
+      "question": "Trong hệ nhiều datasource không JTA, điều gì bắt buộc khi ghi transaction ở service báo cáo?",
+      "options": [
+        "Không cần chỉ định gì thêm",
+        "Chỉ định đúng transaction manager của datasource report",
+        "Bật phân tán hai pha cho mọi transaction",
+        "Tắt transaction cho báo cáo"
+      ],
+      "answerIndex": 1,
+      "explanation": "Không có JTA thì mỗi datasource có transaction manager riêng; chỉ định sai sẽ khiến transaction chạy trên datasource khác với dữ liệu đang thao tác."
+    },
+    {
+      "question": "Specification tốt có đặc điểm nào?",
+      "options": [
+        "Chứa toàn bộ mọi điều kiện của mọi báo cáo trong một method",
+        "Luôn trả về danh sách rỗng khi thiếu tham số mà không ai biết",
+        "Phụ thuộc vào controller",
+        "Nhỏ, có tên theo ngôn ngữ nghiệp vụ, test được độc lập và tổ hợp được"
+      ],
+      "answerIndex": 3,
+      "explanation": "Tính lắp ghép chỉ có giá trị khi từng khối nhỏ, rõ nghĩa và kiểm chứng được riêng lẻ."
+    },
+    {
+      "question": "Khi điều kiện lọc là null, specification trong bài xử lý thế nào và vì sao?",
+      "options": [
+        "Ném exception ngay",
+        "Bỏ qua toàn bộ truy vấn",
+        "Trả về điều kiện luôn đúng để tổ hợp không bị ảnh hưởng",
+        "Tự thay bằng giá trị mặc định bất kỳ"
+      ],
+      "answerIndex": 2,
+      "explanation": "Trả điều kiện trung tính giúp service tổ hợp thống nhất cho cả tiêu chí có và không được cung cấp."
+    },
+    {
+      "question": "Repository nên lộ ra tầng trên những gì?",
+      "options": [
+        "Các thao tác theo ngôn ngữ miền nghiệp vụ, che giấu chi tiết lưu trữ bên trong",
+        "Chi tiết câu truy vấn và connection",
+        "Entity manager của JPA",
+        "Tên bảng vật lý cho controller tự ghép"
+      ],
+      "answerIndex": 0,
+      "explanation": "Repository là biên giới trừu tượng: tầng trên nói bằng nghiệp vụ, chi tiết truy vấn nằm sau biên giới đó."
+    },
+    {
+      "question": "Dấu hiệu CQRS nhẹ đang bị lạm dụng là gì?",
+      "options": [
+        "Báo cáo có bộ lọc động",
+        "Có datasource report riêng cho báo cáo nặng",
+        "Hệ thống nhỏ, tải thấp nhưng vẫn dựng pipeline đồng bộ phức tạp và hai mô hình cho mọi entity",
+        "Đội ngũ phàn nàn báo cáo làm chậm giao dịch"
+      ],
+      "answerIndex": 2,
+      "explanation": "CQRS chỉ có lãi khi lợi ích tách tải và tối ưu đọc vượt chi phí đồng bộ, giám sát và độ trễ mà nó mang lại."
+    },
+    {
+      "question": "Điểm giám sát quan trọng nhất của pipeline đồng bộ mô hình đọc là gì?",
+      "options": [
+        "Số lượng developer online",
+        "Độ trễ đồng bộ và lỗi đồng bộ, kèm thời điểm đồng bộ thành công gần nhất",
+        "Màu sắc dashboard",
+        "Số lượng specification"
+      ],
+      "answerIndex": 1,
+      "explanation": "Người dùng báo cáo cần biết dữ liệu tươi tới đâu; đội vận hành cần cảnh báo khi pipeline chậm hoặc lỗi."
+    }
+  ]
+}

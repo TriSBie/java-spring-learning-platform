@@ -1,0 +1,209 @@
+---
+title: "Retry với backoff, DLQ và graceful shutdown draining 75 giây"
+module: 6
+level: "Senior"
+duration: 55
+order: 6
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Spring Kafka 3.3.x", "Kafka 3.8"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Thiết kế được chính sách retry đúng cho consumer và client của Nova: retry lỗi tạm thời với exponential backoff cộng jitter, không retry lỗi nghiệp vụ vĩnh viễn.
+- Cấu hình được Dead Letter Queue (DLQ) cho Kafka consumer bằng cơ chế của Spring Kafka, kèm quy trình vận hành xử lý message trong DLQ.
+- Mô tả và cấu hình được graceful shutdown cho cả phía web và phía Kafka listener, khớp ngân sách draining 75 giây khi pod nhận SIGTERM.
+
+## Vì sao cần biết
+
+Chuỗi Outbox, Debezium, Kafka tới CRM của Nova Loyalty sống trong một thế giới mà lỗi tạm thời là chuyện hằng ngày: CRM chậm vài giây, mạng chớp nhoáng, consumer group rebalance. Không có retry, những chớp nhoáng đó biến thành mất đồng bộ điểm của khách hàng. Nhưng retry sai còn tệ hơn không retry: retry liền lập tức không giãn cách sẽ dội bão vào một downstream đang hấp hối, retry cả lỗi nghiệp vụ vĩnh viễn sẽ quay vòng vô hạn một message hỏng, và không có DLQ thì một message độc (poison message) chặn cả partition phía sau nó. Cuối cùng, mọi cơ chế trên đều vô nghĩa nếu lúc deploy, pod bị giết giữa chừng khi đang xử lý và ngân sách draining 75 giây của Nova không được tôn trọng.
+
+## Nội dung chính
+
+### Phân loại lỗi trước khi nói đến retry
+
+Quyết định retry bắt đầu bằng phân loại lỗi, không phải bằng con số lần thử:
+
+- Lỗi tạm thời (transient): timeout mạng, downstream quá tải trả lỗi tạm thời, rebalance đang diễn ra. Nhóm này đáng retry vì lần thử sau có cơ hội thành công thật.
+- Lỗi vĩnh viễn (permanent): payload sai định dạng, dữ liệu vi phạm ràng buộc nghiệp vụ, bản ghi tham chiếu không tồn tại. Nhóm này retry bao nhiêu cũng thất bại y hệt; phải đi thẳng tới xử lý lỗi cuối cùng.
+- Lỗi không rõ ràng: request đã có thể được phía nhận xử lý nhưng response bị mất. Nhóm này chỉ retry được khi thao tác là idempotent (xem bài idempotency), nếu không retry sẽ nhân đôi tác dụng.
+
+### Exponential backoff và jitter
+
+Backoff là việc chờ ngày càng lâu giữa các lần thử: lần chờ sau dài hơn lần chờ trước theo cấp số nhân, thường có trần tối đa. Nó cho downstream thời gian hồi phục và tránh việc mọi client cùng dội lại ở cùng thời điểm.
+
+Jitter là thành phần ngẫu nhiên cộng thêm vào thời gian chờ. Không có jitter, hàng trăm consumer cùng bắt đầu retry sau một sự cố chung sẽ lại đồng loạt ập tới ở đúng cùng một nhịp (thundering herd). Backoff không jitter chỉ giải quyết được một nửa bài toán.
+
+Một chính sách retry hoàn chỉnh luôn gồm bốn con số: số lần thử tối đa, thời gian chờ ban đầu, hệ số nhân hoặc trần chờ, và tổng ngân sách thời gian. Thiếu ngân sách tổng, nhiều lớp retry lồng nhau (client retry, gateway retry, consumer retry) nhân lên thành thời gian chờ không ai lường trước.
+
+### DLQ: nơi message hỏng đến để được nhìn thấy
+
+Dead Letter Queue (trong Kafka thường là một topic riêng, hay gọi là DLT — Dead Letter Topic) nhận các message đã thất bại sau khi hết retry hoặc thuộc loại không được retry. DLQ đúng nghĩa không phải bãi rác để quên: nó là một hàng đợi vận hành, cần có đủ thông tin kèm theo message gốc như topic/partition/offset gốc, loại exception và thời điểm thất bại, để đội vận hành có thể chẩn đoán, sửa nguyên nhân, rồi phát lại (replay) message về topic chính.
+
+Với Spring Kafka, `DefaultErrorHandler` kết hợp `DeadLetterPublishingRecoverer` là cơ chế chuẩn: sau số lần thử theo backoff đã cấu hình, recoverer publish message sang topic chết thay vì chặn partition mãi mãi.
+
+<Mermaid chart={`flowchart TD
+  A[Message tu Kafka] --> B[Consumer xu ly]
+  B --> C{Thanh cong}
+  C -->|Co| D[Commit offset, di tiep]
+  C -->|Khong, loi tam thoi| E{Con luot retry}
+  E -->|Con| F[Cho backoff + jitter roi thu lai]
+  F --> B
+  E -->|Het| G[Publish sang DLQ kem metadata loi]
+  C -->|Khong, loi vinh vien| G
+  G --> H[Van hanh chan doan, sua nguyen nhan, replay]
+`} label="Vòng đời xử lý lỗi: retry có backoff cho lỗi tạm thời, DLQ cho message hết lượt hoặc lỗi vĩnh viễn, và replay sau khi sửa nguyên nhân." />
+
+### Graceful shutdown và draining
+
+Khi Kubernetes quyết định thay pod, nó gửi SIGTERM và cho pod một khoảng `terminationGracePeriodSeconds` trước khi gửi SIGKILL. Ở Nova, consumer phía CRM có ngân sách draining tổng là 75 giây. Graceful shutdown đúng trong khoảng đó gồm:
+
+- Ngừng nhận việc mới: web server ngừng nhận request mới, Kafka listener ngừng poll record mới.
+- Hoàn tất việc đang dở trong giới hạn thời gian: request đang chạy được xử lý xong, record đang xử lý được commit offset đúng cách.
+- Đóng tài nguyên theo thứ tự: listener container, rồi các pool và kết nối, trong ngân sách của từng phase shutdown của Spring Boot.
+
+Hai cấu hình phải khớp nhau: ngân sách shutdown của ứng dụng (ví dụ `spring.lifecycle.timeout-per-shutdown-phase`) và `terminationGracePeriodSeconds` ở Deployment cần được thiết kế cùng nhau, cộng với `preStop` hook nếu cần trừ hao thời gian lan truyền việc gỡ endpoint. Nếu ứng dụng cần 75 giây để drain mà grace period của pod ngắn hơn, SIGKILL sẽ cắt ngang mọi cam kết graceful.
+
+## Code
+
+Cấu hình error handler cho Kafka listener với backoff hàm mũ có trần và DLQ. Các khóa cấu hình cần đối chiếu tài liệu Spring Kafka của đúng phiên bản đang dùng.
+
+```java filename=CrmConsumerErrorConfig.java
+package com.nova.loyalty.crm;
+
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.TopicPartition;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
+import org.springframework.kafka.listener.DefaultErrorHandler;
+import org.springframework.util.backoff.ExponentialBackOff;
+
+@Configuration
+public class CrmConsumerErrorConfig {
+
+    @Bean
+    public DefaultErrorHandler crmErrorHandler(KafkaTemplate<String, String> kafkaTemplate) {
+        DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(
+                kafkaTemplate,
+                (record, exception) -> new TopicPartition("nova.points.changed.DLT", record.partition()));
+        ExponentialBackOff backOff = new ExponentialBackOff(1000L, 2.0);
+        backOff.setMaxInterval(30000L);
+        DefaultErrorHandler handler = new DefaultErrorHandler(recoverer, backOff);
+        handler.addNotRetryableExceptions(IllegalArgumentException.class);
+        handler.setCommitRecovered(true);
+        return handler;
+    }
+}
+```
+
+Cấu hình resilience cho lời gọi đồng bộ tới CRM bằng Resilience4j (khai báo trong `application.yml`), giữ nguyên triết lý: giới hạn lần thử và ngân sách tổng, không retry lỗi nghiệp vụ được khai báo qua cấu hình ngoại lệ bỏ qua trong code:
+
+```yaml filename=application.yml
+resilience4j:
+  retry:
+    instances:
+      crmClient:
+        max-attempts: 3
+        wait-duration: 500ms
+        exponential-backoff-multiplier: 2
+        enable-randomized-wait: true
+        randomized-wait-factor: 0.5
+server:
+  shutdown: graceful
+spring:
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+  kafka:
+    listener:
+      auto-startup: true
+```
+
+Ghi chú quan trọng về con số: ngân sách draining 75 giây của Nova là tổng ngân sách ở tầng pod (`terminationGracePeriodSeconds` của Deployment, xem Module 11). Con số `timeout-per-shutdown-phase` ở trên chỉ là ngân sách cho một phase trong ứng dụng và phải được tính sao cho tổng các phase, cộng phần trừ hao gỡ endpoint, nằm gọn trong 75 giây đó.
+
+Listener minh họa việc xử lý xong record hiện tại trước khi container dừng, thay vì ngắt giữa chừng:
+
+```java filename=CrmSyncListener.java
+package com.nova.loyalty.crm;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.support.Acknowledgment;
+import org.springframework.stereotype.Component;
+
+@Component
+public class CrmSyncListener {
+
+    private static final Logger log = LoggerFactory.getLogger(CrmSyncListener.class);
+
+    private final CrmSyncService syncService;
+
+    public CrmSyncListener(CrmSyncService syncService) {
+        this.syncService = syncService;
+    }
+
+    @KafkaListener(topics = "nova.points.changed", groupId = "crm-sync",
+            containerFactory = "crmKafkaListenerContainerFactory")
+    public void onPointsChanged(String payload, Acknowledgment acknowledgment) {
+        syncService.applyIdempotently(payload);
+        acknowledgment.acknowledge();
+        log.debug("CRM sync applied and offset acknowledged");
+    }
+}
+```
+
+> [!WARNING] Cần verify với docs version Spring Kafka 3.3.x và Spring Boot 3.3.x: tên khóa cấu hình listener, hành vi mặc định của error handler và chi tiết các phase graceful shutdown có thể khác giữa các bản; đối chiếu tài liệu trước khi khóa con số vào production.
+
+## Sai lầm thường gặp
+
+### 1. Retry mọi lỗi với cùng một chính sách
+
+- **Triệu chứng:** Một message có payload hỏng quay vòng liên tục trong log lỗi, và cả partition phía sau nó không tiến lên được.
+- **Nguyên nhân:** Không phân loại lỗi tạm thời và lỗi vĩnh viễn; message không bao giờ thành công cũng được retry như message chớp nhoáng.
+- **Fix:** Khai báo rõ nhóm ngoại lệ không retry, gửi chúng thẳng tới DLQ kèm metadata, và chỉ retry nhóm lỗi tạm thời với số lần có hạn.
+
+### 2. Backoff không có jitter và không có ngân sách tổng
+
+- **Triệu chứng:** Sau mỗi sự cố downstream, traffic hồi phục theo từng đợt sóng đồng loạt và lại làm downstream sập lần nữa.
+- **Nguyên nhân:** Mọi client cùng chờ đúng một khoảng thời gian giống hệt nhau và cùng thử lại một nhịp; các lớp retry lồng nhau nhân tổng thời gian chờ vượt mọi timeout ở tầng trên.
+- **Fix:** Luôn bật jitter cho backoff, đặt trần chờ, và tính ngân sách tổng của toàn bộ chuỗi retry sao cho nhỏ hơn timeout của tầng gọi ngoài cùng.
+
+### 3. Grace period của pod ngắn hơn thời gian drain ứng dụng cần
+
+- **Triệu chứng:** Mỗi lần deploy, một lượng record đang xử lý dở bị bỏ ngang và phải deliver lại, thỉnh thoảng kèm theo mất dấu offset đã commit.
+- **Nguyên nhân:** `terminationGracePeriodSeconds` ở Deployment và ngân sách shutdown trong ứng dụng được cấu hình độc lập, không ai đối chiếu tổng của chúng với con số 75 giây.
+- **Fix:** Thiết kế hai phía cùng nhau: tổng thời gian drain của ứng dụng cộng trừ hao gỡ endpoint phải nằm gọn trong grace period của pod, và kiểm thử bằng một lần rollout có quan sát.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được; trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay, không có chấm tự động.
+
+1. Phân loại mười tình huống lỗi tự liệt kê trong chuỗi Outbox tới CRM của Nova thành ba nhóm tạm thời, vĩnh viễn và không rõ ràng; mỗi nhóm ghi chính sách retry tương ứng.
+2. Thiết kế chính sách retry đầy đủ bốn con số (số lần, chờ ban đầu, trần chờ, ngân sách tổng) cho consumer phía CRM và cho lời gọi đồng bộ tới CRM, giải thích quan hệ giữa hai chính sách.
+3. Viết quy trình vận hành cho DLQ của Nova: ai theo dõi, ngưỡng cảnh báo nào, các bước chẩn đoán, điều kiện để replay và cách xác minh message đã replay thành công.
+4. Lập bảng ngân sách draining 75 giây cho pod consumer của Nova: phân bổ thời gian cho gỡ endpoint, ngừng poll, xử lý nốt record đang dở, commit offset và đóng tài nguyên; chỉ ra hậu quả nếu một mục vượt ngân sách của nó.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring for Apache Kafka — Error Handling và Dead Letter Topics: https://docs.spring.io/spring-kafka/reference/kafka/annotation-error-handling.html
+- Spring Boot — Graceful Shutdown: https://docs.spring.io/spring-boot/reference/web/graceful-shutdown.html
+- Resilience4j — Retry Documentation: https://resilience4j.readme.io/docs/retry
+- Apache Kafka — Documentation: https://kafka.apache.org/documentation/
+
+## Đọc thêm
+
+Không có.

@@ -1,0 +1,181 @@
+---
+title: "Caching Hai Tầng: Caffeine, Redis và Cacheable"
+module: 8
+level: "Middle"
+duration: 50
+order: 4
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Micrometer 1.13.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Cấu hình được cache hai tầng với Caffeine trong tiến trình và Redis dùng chung, chọn đúng tầng cho từng loại dữ liệu của Nova Loyalty.
+- Dùng đúng `@Cacheable`, `@CacheEvict` và `@CachePut`, tránh được lỗi self-invocation khiến annotation bị bỏ qua.
+- Thiết kế được chính sách thời gian sống, vô hiệu hóa và khóa cache cho dữ liệu điểm, nêu rõ cửa sổ dữ liệu cũ được nghiệp vụ chấp nhận.
+
+## Vì sao cần biết
+
+Số dư điểm và thông tin hạng thành viên của Nova Loyalty được đọc liên tục qua gateway, trong khi ghi thay đổi điểm ít hơn nhiều — tỉ lệ đọc ghi lệch hẳn là mảnh đất màu mỡ cho cache. Nhưng cache sai cách còn nguy hiểm hơn không cache: khách vừa đổi quà xong mà vẫn thấy số dư cũ sẽ mất niềm tin ngay lập tức. Nova dùng Caffeine cho dữ liệu nóng trong từng instance và Redis cho dữ liệu cần dùng chung giữa các instance, với kỷ luật vô hiệu hóa gắn liền luồng ghi CAS và khóa idempotency của giao dịch điểm.
+
+## Nội dung chính
+
+### Hai tầng cache, hai bài toán khác nhau
+
+Cache trong tiến trình như Caffeine cho độ trễ thấp nhất vì không qua mạng.
+Đổi lại, mỗi instance giữ một bản sao riêng và dữ liệu giữa các instance có thể lệch nhau trong cửa sổ thời gian sống.
+Cache phân tán như Redis cho mọi instance cùng một bản dữ liệu và khả năng vô hiệu hóa tập trung.
+Giá của Redis là một vòng mạng cho mỗi lần truy cập và thêm một hệ thống phải vận hành.
+Dữ liệu càng nóng và càng chịu được lệch ngắn hạn càng hợp tầng trong tiến trình.
+
+### Bộ ba annotation và cái bẫy self-invocation
+
+Annotation đọc cache tự điền kết quả khi chưa có trong cache.
+Annotation xóa cache dùng cho luồng ghi để loại bỏ dữ liệu cũ theo khóa.
+Annotation ghi cache cập nhật giá trị mới sau khi method chạy thành công.
+Cả ba đều hoạt động qua proxy của Spring: lời gọi nội bộ trong cùng class sẽ không qua proxy và annotation bị bỏ qua lặng lẽ.
+Muốn hành vi cache áp dụng, lời gọi phải đi từ bean khác vào hoặc tách method cần cache ra bean riêng.
+
+### Khóa, thời gian sống và dữ liệu điểm
+
+Khóa cache phải chứa mọi tham số làm thay đổi kết quả, ví dụ mã thành viên và nguồn ví.
+Nova có 3 nguồn ví điểm khác nhau, thiếu nguồn ví trong khóa sẽ trộn dữ liệu giữa các ví.
+Thời gian sống là hợp đồng với nghiệp vụ về cửa sổ dữ liệu cũ tối đa được chấp nhận.
+Luồng ghi thay đổi điểm phải vô hiệu hóa hoặc cập nhật cache trong cùng thiết kế với cập nhật CAS và khóa idempotency.
+Khi nhiều request cùng lỡ cache cho một khóa nóng, cần cơ chế đồng bộ nạp để tránh dồn dập xuống database.
+
+<Mermaid chart={`flowchart TD
+  Req[Đọc số dư] --> L1{{Caffeine trong instance}}
+  L1 -->|trúng| Out[Trả kết quả]
+  L1 -->|trượt| L2{{Redis dùng chung}}
+  L2 -->|trúng| Fill1[Điền lại Caffeine]
+  Fill1 --> Out
+  L2 -->|trượt| DB[(Datasource core)]
+  DB --> Fill2[Điền Redis và Caffeine]
+  Fill2 --> Out`} label="Luồng đọc hai tầng: Caffeine trước, Redis sau, database cuối cùng" />
+
+### Giám sát cache
+
+Tỉ lệ trúng cache phải được đọc cùng độ trễ và tải database mới có ý nghĩa.
+Tỉ lệ trúng cao nhưng dữ liệu sai khóa vẫn là lỗi nghiệp vụ nghiêm trọng.
+Cần metric riêng cho từng cache theo tên, kèm cảnh báo khi tỉ lệ trúng tụt bất thường sau deploy.
+
+Khi vận hành, hãy tập thói quen đọc tỉ lệ trúng cache cùng lúc với độ trễ và tải database trên cùng một cửa sổ thời gian.
+
+## Code
+
+Dependencies trong `pom.xml`: `spring-boot-starter-cache`, `spring-boot-starter-data-redis` và thư viện Caffeine. Package mẫu là `com.nova.loyalty.points`.
+
+```java filename=CacheConfig.java
+package com.nova.loyalty.points;
+
+import com.github.benmanes.caffeine.cache.Caffeine;
+import java.time.Duration;
+import org.springframework.cache.CacheManager;
+import org.springframework.cache.annotation.EnableCaching;
+import org.springframework.cache.caffeine.CaffeineCacheManager;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
+import org.springframework.data.redis.cache.RedisCacheConfiguration;
+import org.springframework.data.redis.cache.RedisCacheManager;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
+
+@Configuration
+@EnableCaching
+public class CacheConfig {
+
+    @Primary
+    @Bean
+    public CacheManager caffeineCacheManager() {
+        CaffeineCacheManager manager = new CaffeineCacheManager("memberTier");
+        manager.setCaffeine(Caffeine.newBuilder()
+                .maximumSize(10_000)
+                .expireAfterWrite(Duration.ofMinutes(5)));
+        return manager;
+    }
+
+    @Bean
+    public CacheManager redisCacheManager(RedisConnectionFactory factory) {
+        RedisCacheConfiguration config = RedisCacheConfiguration.defaultCacheConfig()
+                .entryTtl(Duration.ofMinutes(10))
+                .disableCachingNullValues();
+        return RedisCacheManager.builder(factory)
+                .cacheDefaults(config)
+                .build();
+    }
+}
+```
+
+```java filename=MemberBalanceService.java
+package com.nova.loyalty.points;
+
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.stereotype.Service;
+
+@Service
+public class MemberBalanceService {
+
+    @Cacheable(cacheNames = "memberTier", key = "#memberId + ':' + #walletSource")
+    public String findTier(String memberId, String walletSource) {
+        return "GOLD";
+    }
+
+    @CacheEvict(cacheNames = "memberTier", key = "#memberId + ':' + #walletSource")
+    public void onPointsChanged(String memberId, String walletSource) {
+        System.out.println("Evicted tier cache for " + memberId + " source " + walletSource);
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Self-invocation làm annotation cache không chạy
+
+- **Triệu chứng:** Thêm annotation đọc cache nhưng database vẫn bị gọi mọi lần và metric cache không tăng.
+- **Nguyên nhân:** Method được gọi nội bộ trong cùng class nên lời gọi không đi qua proxy xử lý cache của Spring.
+- **Fix:** Tách method cần cache sang bean riêng hoặc gọi qua bean khác; kiểm chứng bằng metric và test tích hợp.
+
+### 2. Khóa cache thiếu nguồn ví
+
+- **Triệu chứng:** Khách thấy hạng và số dư của ví này bị áp cho ví khác.
+- **Nguyên nhân:** Nova có 3 nguồn ví nhưng khóa chỉ chứa mã thành viên, các ví dùng chung một mục cache.
+- **Fix:** Đưa mọi tham số làm thay đổi kết quả vào khóa, đặc biệt nguồn ví, và viết test cho hai ví khác nhau của cùng thành viên.
+
+### 3. Không vô hiệu hóa cache sau giao dịch trừ điểm
+
+- **Triệu chứng:** Số dư hiển thị cũ sau khi đổi quà, khách khiếu nại dù giao dịch đã thành công.
+- **Nguyên nhân:** Luồng ghi cập nhật database và CAS nhưng quên xóa hoặc cập nhật mục cache tương ứng.
+- **Fix:** Gắn bước vô hiệu hóa vào cùng thiết kế của luồng ghi, kiểm chứng bằng kịch bản ghi rồi đọc ngay.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Thiết kế:** Phân loại 6 loại dữ liệu của Nova vào ba nhóm: Caffeine, Redis, không cache; mỗi nhóm kèm lý do và cửa sổ dữ liệu cũ chấp nhận được.
+2. **Đọc code:** Chỉ ra điều gì xảy ra nếu hai instance cùng lỡ cache Redis cho một khóa nóng và đề xuất cơ chế chống dồn dập xuống database.
+3. **Viết tay:** Viết bộ ba method đọc, ghi và xóa cache cho thông tin quà tặng trên datasource `gift` với khóa đầy đủ tham số.
+4. **Phản biện:** Khi nào cache số dư điểm là quyết định sai dù tỉ lệ đọc rất cao? Nêu tiêu chí nghiệp vụ quyết định.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Framework — Cache Abstraction: https://docs.spring.io/spring-framework/reference/integration/cache.html
+- Spring Boot — Caching: https://docs.spring.io/spring-boot/reference/io/caching.html
+- Spring Data Redis — Reference Documentation: https://docs.spring.io/spring-data/redis/reference/
+
+## Đọc thêm
+
+Không có.

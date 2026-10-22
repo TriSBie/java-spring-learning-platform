@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Phân biệt được Decorator thủ công và proxy do Spring container tạo.",
+    "Cài đặt được decorator caching và logging bọc quanh service mà không sửa service lõi.",
+    "Dùng đúng qualifier và `@Primary` để kiểm soát việc tiêm bean.",
+    "Giải thích được thứ tự bọc ảnh hưởng thế nào tới hành vi quan sát được.",
+    "Nhận biết và tránh được lỗi self-invocation khi cần hành vi bọc.",
+    "Thiết kế được cơ chế vô hiệu hóa cache đi kèm nghiệp vụ thay đổi điểm."
+  ],
+  "quiz": [
+    {
+      "question": "Decorator trong Spring thường được cài đặt bằng cách nào?",
+      "options": [
+        "Kế thừa service lõi và ghi đè mọi method",
+        "Một bean cùng interface, giữ tham chiếu tới bean bên trong và ủy quyền sau khi thêm hành vi",
+        "Sao chép code của service lõi",
+        "Dùng static method tiện ích"
+      ],
+      "answerIndex": 1,
+      "explanation": "Decorator giữ cùng interface và ủy quyền cho delegate: hành vi mới được thêm quanh lời gọi mà service lõi không hề biết."
+    },
+    {
+      "question": "`@Primary` có tác dụng gì khi có nhiều bean cùng type?",
+      "options": [
+        "Xóa các bean còn lại khỏi context",
+        "Bắt buộc mọi nơi gọi dùng bean đó kể cả khi có qualifier khác",
+        "Đánh dấu bean mặc định được chọn khi nơi gọi không chỉ định qualifier",
+        "Tăng độ ưu tiên khởi động của bean"
+      ],
+      "answerIndex": 2,
+      "explanation": "Primary chỉ là lựa chọn mặc định khi thiếu thông tin chọn bean; qualifier tường minh tại điểm tiêm vẫn thắng."
+    },
+    {
+      "question": "Trong chuỗi cache ngoài, logging trong, lần gọi trúng cache sẽ thế nào?",
+      "options": [
+        "Không đi qua logging decorator vì cache trả kết quả ngay",
+        "Vẫn ghi log như lần đầu",
+        "Ghi log hai lần",
+        "Ném exception"
+      ],
+      "answerIndex": 0,
+      "explanation": "Thứ tự bọc quyết định hành vi: lớp ngoài chặn trước thì các lớp trong không được thực thi cho lần gọi đó."
+    },
+    {
+      "question": "Self-invocation gây vấn đề gì với cơ chế proxy và bọc bean?",
+      "options": [
+        "Làm ứng dụng không biên dịch được",
+        "Tạo vòng lặp vô hạn",
+        "Làm mất bean khỏi context",
+        "Lời gọi nội bộ trong cùng bean không đi qua lớp bọc hay proxy bên ngoài"
+      ],
+      "answerIndex": 3,
+      "explanation": "Proxy và decorator chỉ chặn lời gọi từ bên ngoài vào bean. Gọi nội bộ bằng tham chiếu trực tiếp sẽ bỏ qua lớp bọc."
+    },
+    {
+      "question": "Khi nào qualifier tường minh tốt hơn dựa vào Primary?",
+      "options": [
+        "Khi chỉ có một bean duy nhất",
+        "Khi các nơi gọi khác nhau cần các biến thể khác nhau một cách có chủ đích",
+        "Khi muốn ẩn thiết kế khỏi người review",
+        "Không bao giờ"
+      ],
+      "answerIndex": 1,
+      "explanation": "Qualifier ghi rõ ý định ngay tại điểm tiêm, giúp review và bảo trì dễ hơn nhiều so với mặc định ẩn."
+    },
+    {
+      "question": "Rủi ro lớn nhất của decorator caching tự chế là gì?",
+      "options": [
+        "Không dùng được interface",
+        "Không thể ghi log",
+        "Bắt buộc dùng nhiều datasource",
+        "Thiếu cơ chế vô hiệu hóa khiến dữ liệu cũ sống lâu sau khi nghiệp vụ đã thay đổi dữ liệu"
+      ],
+      "answerIndex": 3,
+      "explanation": "Cache tự chế phải tự lo eviction và thời gian sống. Thiếu eviction sau giao dịch trừ điểm là lỗi nghiệp vụ nghiêm trọng."
+    },
+    {
+      "question": "Vì sao không nên sửa trực tiếp service lõi để thêm logging cho mọi method?",
+      "options": [
+        "Vì logging bị cấm trong service",
+        "Vì service không được phép có Logger",
+        "Vì trộn mối quan tâm cắt ngang vào nghiệp vụ làm service khó test và khó thay đổi chính sách log",
+        "Vì log chỉ chạy trong controller"
+      ],
+      "answerIndex": 2,
+      "explanation": "Tách logging thành decorator giữ service lõi tập trung vào nghiệp vụ và cho phép thay đổi chính sách log độc lập."
+    },
+    {
+      "question": "Hai decorator bọc nhau tạo thành cấu trúc gì?",
+      "options": [
+        "Một chuỗi ủy quyền mà mỗi lớp thêm một hành vi trước hoặc sau lời gọi vào lớp trong",
+        "Một class duy nhất hợp nhất",
+        "Hai bean độc lập không liên quan",
+        "Một vòng lặp phụ thuộc bị cấm"
+      ],
+      "answerIndex": 0,
+      "explanation": "Mỗi decorator ủy quyền cho lớp trong sau khi thêm hành vi của mình, tạo chuỗi hành vi có thứ tự rõ ràng."
+    },
+    {
+      "question": "Dấu hiệu lạm dụng Primary trong codebase là gì?",
+      "options": [
+        "Chỉ một bean được đánh dấu trong toàn hệ thống",
+        "Dùng qualifier ở controller",
+        "Nhiều module tự đánh dấu mặc định cho type dùng chung, gây mơ hồ khi hợp nhất",
+        "Có test cho việc chọn bean"
+      ],
+      "answerIndex": 2,
+      "explanation": "Primary là quyết định ở cấp ứng dụng, không phải cấp module. Nhiều mặc định cạnh tranh làm hành vi chọn bean khó dự đoán."
+    },
+    {
+      "question": "Cách kiểm chứng chuỗi decorator hoạt động đúng thứ tự là gì?",
+      "options": [
+        "Đọc tên class theo thứ tự alphabet",
+        "Viết test tích hợp đếm số lần delegate được gọi và kiểm tra log, cache qua các lần gọi liên tiếp",
+        "Chỉ kiểm tra ứng dụng khởi động được",
+        "Không thể kiểm chứng"
+      ],
+      "answerIndex": 1,
+      "explanation": "Test hành vi qua nhiều lần gọi liên tiếp mới lộ được thứ tự bọc, eviction và self-invocation."
+    }
+  ]
+}

@@ -1,0 +1,207 @@
+---
+title: "API Gateway với Kong: routing theo /v4/{gs,os,ws}/* và plugins"
+module: 6
+level: "Middle"
+duration: 45
+order: 2
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Spring Security 6.3.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Giải thích được vai trò của API gateway trong kiến trúc của Nova Loyalty và các khái niệm cốt lõi của Kong: Service, Route, Consumer, Plugin.
+- Viết được cấu hình khai báo (declarative) cho Kong định tuyến ba nhóm route `/v4/{gs,os,ws}/*` về đúng upstream, kèm plugin rate limiting và xác thực ở biên.
+- Nêu được ranh giới trách nhiệm đúng: việc gì làm ở gateway, việc gì vẫn phải làm ở từng service phía sau.
+
+## Vì sao cần biết
+
+Mọi traffic bên ngoài vào Nova Loyalty đều qua một cửa duy nhất: gateway định tuyến theo tiền tố `/v4/{gs,os,ws}/*`, trong đó mỗi nhóm chữ viết tắt đại diện cho một bề mặt client khác nhau (khách hàng, vận hành, đối tác). Gateway là nơi áp dụng các chính sách cắt ngang như chặn theo tốc độ, kiểm tra token ở biên, gắn correlation id và ghi log thống nhất. Nếu cấu hình route sai một ký tự, traffic của một bề mặt có thể chảy vào nhầm service; nếu dồn hết logic bảo mật lên gateway và bỏ trống phía service, một lời gọi nội bộ vòng qua gateway sẽ mở toang hệ thống.
+
+## Nội dung chính
+
+### Gateway giải quyết vấn đề gì
+
+Không có gateway, mỗi client phải biết địa chỉ của từng service, và mỗi service tự lặp lại các chính sách giống nhau. Gateway gom các mối quan tâm cắt ngang về một điểm:
+
+- Định tuyến: ánh xạ path và host bên ngoài thành service nội bộ.
+- Chính sách biên: rate limiting, giới hạn kích thước request, kiểm tra token ở mức biên, CORS cho client trình duyệt.
+- Quan sát: log và metric thống nhất tại điểm vào, gắn `X-Request-Id` để truy vết xuyên suốt.
+- Che giấu cấu trúc nội bộ: bên ngoài chỉ thấy các route đã công bố, topology bên trong thay đổi không làm vỡ client.
+
+Gateway không thay thế bảo mật tầng service. Một gateway đúng vai chỉ chặn sớm những gì chặn được ở biên; quyết định phân quyền cần dữ liệu nghiệp vụ vẫn thuộc về service.
+
+### Mô hình đối tượng của Kong
+
+Kong tổ chức cấu hình thành các đối tượng liên kết:
+
+- Service: một upstream đích (nhóm backend) với các thông số kết nối và retry.
+- Route: điều kiện khớp (host, path, method, header) gắn vào một Service. Một Service có nhiều Route.
+- Consumer: danh tính của phía gọi đã biết (đối tác, ứng dụng), dùng cho plugin theo đối tượng gọi.
+- Plugin: chính sách gắn ở mức toàn cục, theo Service, theo Route hoặc theo Consumer — thứ tự ưu tiên càng cụ thể càng thắng.
+
+Ở Nova, ba nhóm route tương ứng ba bề mặt: nhóm `gs` cho khách hàng, nhóm `os` cho vận hành, nhóm `ws` cho đối tác tích hợp. Việc tách route theo nhóm là chỗ cắm tự nhiên cho các chính sách khác nhau: giới hạn tốc độ của đối tác khác của khách hàng, và route vận hành có thể thêm điều kiện nguồn mạng nội bộ.
+
+### Cấu hình khai báo (declarative, DB-less)
+
+Kong hỗ trợ vận hành không database bằng một file khai báo YAML duy nhất: toàn bộ Service, Route, Consumer và Plugin nằm trong file, được nạp và áp dụng nguyên tử. Ưu điểm là cấu hình đi qua Git như code, review được, rollback bằng cách nạp lại bản trước. Đánh đổi là mọi thay đổi đều qua quy trình phát hành file, không có thao tác nóng tùy tiện trên giao diện quản trị.
+
+<Mermaid chart={`flowchart LR
+  A[Client khach hang] -->|/v4/gs/...| G[Kong Gateway]
+  B[Client van hanh] -->|/v4/os/...| G
+  C[Doi tac tich hop] -->|/v4/ws/...| G
+  G -->|Route gs + rate-limit + auth| D[Service khach hang]
+  G -->|Route os + dieu kien mang noi bo| E[Service van hanh]
+  G -->|Route ws + quota theo Consumer| F[Service doi tac]
+`} label="Kong định tuyến ba nhóm route của Nova về ba bề mặt service, mỗi route mang bộ plugin riêng." />
+
+### Plugins: rate limiting và auth ở biên
+
+Plugin rate limiting đếm request theo khóa (IP, Consumer, header) trong một cửa sổ thời gian và chặn phần vượt ngưỡng bằng lỗi 429. Plugin xác thực (ví dụ kiểm tra JWT hoặc key) ở gateway giúp loại bỏ sớm request rác trước khi chúng tốn tài nguyên của service phía sau.
+
+Ranh giới an toàn cần khóa chặt:
+
+- Gateway verify token ở biên để chặn sớm không có nghĩa service được bỏ verify. Service vẫn tự kiểm chứng chữ ký và phân quyền chi tiết (xem Module 04), vì traffic nội bộ không đi qua gateway vẫn tồn tại.
+- Rate limit ở gateway theo IP bị ảnh hưởng trực tiếp bởi vấn đề SNAT và mất IP thật (xem bài SNAT ở Module 05): nếu khóa theo IP mà IP đã bị dịch, mọi client dùng chung một khóa và giới hạn trở nên vô nghĩa hoặc gây chặn oan.
+
+## Code
+
+File khai báo Kong dạng DB-less cho ba nhóm route của Nova. Khóa cấu hình plugin cần đối chiếu tài liệu Kong tại thời điểm triển khai.
+
+```yaml filename=kong.yml
+_format_version: "3.0"
+_transform: true
+
+services:
+  - name: nova-guest
+    url: http://nova-guest:8080
+    connect_timeout: 2000
+    read_timeout: 5000
+    retries: 0
+  - name: nova-ops
+    url: http://nova-ops:8080
+    connect_timeout: 2000
+    read_timeout: 5000
+    retries: 0
+  - name: nova-partner
+    url: http://nova-partner:8080
+    connect_timeout: 2000
+    read_timeout: 10000
+    retries: 0
+
+routes:
+  - name: route-v4-gs
+    service: nova-guest
+    paths:
+      - /v4/gs
+    strip_path: false
+    https_redirect_status_code: 426
+  - name: route-v4-os
+    service: nova-ops
+    paths:
+      - /v4/os
+    strip_path: false
+  - name: route-v4-ws
+    service: nova-partner
+    paths:
+      - /v4/ws
+    strip_path: false
+
+plugins:
+  - name: rate-limiting
+    route: route-v4-gs
+    config:
+      minute: 600
+      policy: local
+      fault_tolerant: true
+  - name: rate-limiting
+    route: route-v4-ws
+    config:
+      hour: 10000
+      policy: local
+      fault_tolerant: true
+  - name: correlation-id
+    config:
+      header_name: X-Request-Id
+      generator: uuid
+      echo_downstream: true
+```
+
+Phía service, vẫn giữ nguyên kỷ luật tự bảo vệ như khi không có gateway — ví dụ một `SecurityFilterChain` tối thiểu cho bề mặt đối tác (xem lại Module 04 để có bản đầy đủ):
+
+```java filename=PartnerSurfaceNote.java
+package com.nova.loyalty.gateway.note;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.Customizer;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.web.SecurityFilterChain;
+
+@Configuration
+public class PartnerSurfaceNote {
+
+    @Bean
+    public SecurityFilterChain partnerChain(HttpSecurity http) throws Exception {
+        http
+            .securityMatcher("/v4/ws/**")
+            .authorizeHttpRequests(auth -> auth.anyRequest().authenticated())
+            .oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()))
+            .csrf(csrf -> csrf.disable());
+        return http.build();
+    }
+}
+```
+
+> [!WARNING] Cần verify với docs version Kong đang deploy thực tế: tên plugin, khóa cấu hình và chính sách đếm của rate limiting (local so với cluster/Redis) thay đổi theo bản phát hành và quyết định độ chính xác của giới hạn khi có nhiều node gateway.
+
+## Sai lầm thường gặp
+
+### 1. Tin gateway tuyệt đối, bỏ trống bảo mật ở service
+
+- **Triệu chứng:** Một lời gọi nội bộ hoặc từ một hệ thống khác vòng qua gateway vào thẳng service và thao tác được dữ liệu không qua bất kỳ kiểm tra nào.
+- **Nguyên nhân:** Coi việc gateway đã verify token là đủ và để service mặc định mở cho mọi traffic tới được nó.
+- **Fix:** Service luôn tự verify token và phân quyền theo nguyên tắc phòng thủ nhiều lớp; gateway chỉ là lớp chặn sớm bổ sung.
+
+### 2. Route quá rộng nuốt route cụ thể
+
+- **Triệu chứng:** Traffic của một bề mặt chảy vào nhầm service, hoặc một plugin áp cho sai nhóm client.
+- **Nguyên nhân:** Khai báo path chung chung, không tách route theo đúng ba tiền tố `/v4/{gs,os,ws}/*` và không test ma trận định tuyến.
+- **Fix:** Giữ route tách bạch theo tiền tố, viết kiểm thử định tuyến cho cả ba nhóm và cho các path biên như thiếu tiền tố hoặc tiền tố lạ.
+
+### 3. Rate limit theo IP sau SNAT
+
+- **Triệu chứng:** Toàn bộ khách hàng bị chặn chung khi một nhóm nhỏ lạm dụng, vì mọi request đều mang cùng một IP đã bị dịch.
+- **Nguyên nhân:** Khóa rate limit dựa trên IP nguồn đã bị SNAT đổi thành IP của load balancer hoặc node (xem Module 05).
+- **Fix:** Ưu tiên khóa theo Consumer hoặc danh tính đã xác thực; nếu buộc theo IP, phải khôi phục IP thật qua chuỗi `X-Forwarded-For` tin cậy trước.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được; trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay, không có chấm tự động.
+
+1. Viết file khai báo Kong đầy đủ cho Nova Loyalty gồm ba Service, ba Route theo `/v4/{gs,os,ws}/*` và ít nhất hai plugin khác mức áp dụng; giải thích mức áp dụng của từng plugin.
+2. Lập bảng phân chia trách nhiệm giữa gateway và service cho sáu mối quan tâm: verify chữ ký JWT, phân quyền trên ví điểm, rate limit, CORS, gắn correlation id, giới hạn kích thước body.
+3. Thiết kế kiểm thử định tuyến: liệt kê ít nhất tám request mẫu (đủ ba tiền tố, path lạ, thiếu tiền tố, method lạ) và kết quả kỳ vọng của từng request.
+4. Viết phân tích đánh đổi giữa Kong DB-less khai báo qua file và Kong có database kèm giao diện quản trị, cho bối cảnh team của Nova.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Security — OAuth2 Resource Server (phía service sau gateway): https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/index.html
+- Spring Boot — Reference, Web: https://docs.spring.io/spring-boot/reference/web/index.html
+- RFC 9110 — HTTP Semantics (status 429 và header liên quan): https://datatracker.ietf.org/doc/html/rfc9110
+
+## Đọc thêm
+
+- Tài liệu Kong Gateway trên trang tài liệu của dự án Kong (không chính thức theo whitelist của khóa học — nguồn dự án, dùng để tra cứu khóa cấu hình plugin của đúng phiên bản): https://docs.konghq.com/

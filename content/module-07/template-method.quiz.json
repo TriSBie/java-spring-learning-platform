@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Phân biệt được bước khung cố định và bước biến thiên trong một quy trình import file.",
+    "Cài đặt được abstract class với method khung `final` và hook method hợp lý.",
+    "Viết được subclass mới mà không sửa class cha.",
+    "Giải thích được khi nào nên chọn abstract method thay vì hook có mặc định.",
+    "Nêu được trade-off giữa kế thừa của Template Method và composition của Strategy.",
+    "Xử lý được lỗi từng dòng mà không làm hỏng toàn bộ file import."
+  ],
+  "quiz": [
+    {
+      "question": "Method khung trong Template Method nên được khai báo thế nào?",
+      "options": [
+        "Luôn là abstract",
+        "Là `final` để subclass không phá vỡ trình tự chung",
+        "Là static",
+        "Không cần khai báo gì đặc biệt"
+      ],
+      "answerIndex": 1,
+      "explanation": "Khai báo final bảo vệ khung thuật toán: subclass chỉ được tùy biến qua các bước con đã mở sẵn."
+    },
+    {
+      "question": "Hook method khác abstract method ở điểm nào?",
+      "options": [
+        "Hook không được ghi đè",
+        "Hook chỉ dùng cho interface",
+        "Hook có cài đặt mặc định, subclass ghi đè khi cần; abstract method bắt buộc phải cài đặt",
+        "Không khác nhau"
+      ],
+      "answerIndex": 2,
+      "explanation": "Hook cho hành vi tùy chọn với mặc định hợp lý, abstract method ép subclass cài đặt bước bắt buộc."
+    },
+    {
+      "question": "Trong bài toán import file đối tác, bước nào hợp làm bước riêng của subclass nhất?",
+      "options": [
+        "Parse từng dòng theo định dạng riêng của đối tác",
+        "Ghi log tổng kết",
+        "Đóng file sau khi đọc",
+        "Đếm tổng số dòng lỗi"
+      ],
+      "answerIndex": 0,
+      "explanation": "Parse là phần khác nhau thật sự giữa các đối tác; các bước còn lại thuộc khung chung nên nằm ở class cha."
+    },
+    {
+      "question": "Nhược điểm lớn nhất của Template Method là gì?",
+      "options": [
+        "Không dùng được với Java 21",
+        "Không thể viết unit test",
+        "Bắt buộc phải có database",
+        "Subclass gắn chặt vào class cha qua kế thừa, khó kết hợp nhiều biến thể"
+      ],
+      "answerIndex": 3,
+      "explanation": "Kế thừa tạo liên kết cứng lúc biên dịch. Khi biến thể tổ hợp nhiều, composition bằng Strategy linh hoạt hơn."
+    },
+    {
+      "question": "Vì sao quy trình import nên đọc file theo từng dòng thay vì nạp toàn bộ vào bộ nhớ?",
+      "options": [
+        "Vì file đối tác luôn nhỏ",
+        "Để mức dùng bộ nhớ ổn định với file lớn và xử lý lỗi theo từng dòng",
+        "Vì Java không đọc được file lớn",
+        "Để dùng được nhiều thread hơn"
+      ],
+      "answerIndex": 1,
+      "explanation": "Đọc streaming giúp bộ nhớ không phình theo kích thước file và cho phép ghi nhận lỗi từng dòng độc lập."
+    },
+    {
+      "question": "Nếu một dòng trong file bị sai định dạng, hành vi hợp lý nhất là gì?",
+      "options": [
+        "Dừng toàn bộ import ngay lập tức trong mọi trường hợp",
+        "Cộng 0 điểm và không ghi log",
+        "Tự sửa dữ liệu rồi cộng điểm",
+        "Ghi nhận lỗi của dòng đó và tiếp tục các dòng còn lại, theo chính sách đã thống nhất"
+      ],
+      "answerIndex": 3,
+      "explanation": "Với file điểm đối tác, chính sách phổ biến là bỏ qua dòng lỗi, ghi vào tổng kết để đối soát sau, trừ khi lỗi thuộc header hoặc cấu trúc toàn cục."
+    },
+    {
+      "question": "Template Method phù hợp nhất khi nào?",
+      "options": [
+        "Khi các biến thể không có bước chung nào",
+        "Khi cần thay đổi hành vi tại runtime theo request",
+        "Khi khung thuật toán ổn định và chỉ vài bước khác nhau giữa các biến thể",
+        "Khi không muốn dùng class trừu tượng"
+      ],
+      "answerIndex": 2,
+      "explanation": "Giá trị của pattern nằm ở khung chung ổn định; biến thiên được cô lập vào ít bước rõ ràng."
+    },
+    {
+      "question": "Đặt method bước con ở mức truy cập nào là hợp lý?",
+      "options": [
+        "protected để chỉ subclass và cùng package dùng",
+        "public để mọi nơi gọi tự do",
+        "private để subclass không thấy",
+        "Mặc định không khai báo"
+      ],
+      "answerIndex": 0,
+      "explanation": "Protected giữ các bước con là chi tiết cài đặt của họ class, không phơi thành API công cộng."
+    },
+    {
+      "question": "Cách kiểm chứng subclass mới không phá khung chung tốt nhất là gì?",
+      "options": [
+        "Chỉ test subclass mới",
+        "Không cần test vì kế thừa đã đảm bảo",
+        "Viết bộ test hợp đồng chạy cùng kịch bản cho mọi subclass",
+        "Chỉ đọc code bằng mắt"
+      ],
+      "answerIndex": 2,
+      "explanation": "Contract test chạy cùng kỳ vọng khung (header, lỗi dòng, tổng kết) cho mọi subclass giúp phát hiện lệch khung sớm."
+    },
+    {
+      "question": "Khi số biến thể tăng và các bước bắt đầu tổ hợp chéo nhau, hướng refactor nên cân nhắc là gì?",
+      "options": [
+        "Thêm nhiều tầng kế thừa hơn",
+        "Chuyển các bước biến thiên thành Strategy và dùng composition",
+        "Gộp mọi subclass thành một class lớn",
+        "Bỏ validate để đơn giản hóa"
+      ],
+      "answerIndex": 1,
+      "explanation": "Composition tách các chiều biến thiên độc lập, tránh bùng nổ subclass theo tổ hợp."
+    }
+  ]
+}

@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Giải thích được vì sao pool quá lớn làm database và toàn hệ thống chậm hơn.",
+    "Áp dụng được công thức heuristic làm điểm khởi đầu và nêu rõ giới hạn của nó.",
+    "Lập được ngân sách timeout nối tiếp nhất quán qua gateway và các tầng trong.",
+    "Cấu hình được pool riêng cho từng datasource theo đặc tính tải.",
+    "Đọc được metric pool để phân biệt thiếu pool, truy vấn chậm và rò rỉ connection.",
+    "Nêu được quy trình đo trước và sau khi thay đổi kích thước pool."
+  ],
+  "quiz": [
+    {
+      "question": "Công thức heuristic định cỡ pool nên được dùng thế nào?",
+      "options": [
+        "Là đáp án cuối cho mọi hệ thống",
+        "Là điểm khởi đầu hợp lý, sau đó phải đo và chỉnh theo tải thật",
+        "Chỉ áp dụng cho database nhỏ",
+        "Thay thế hoàn toàn việc giám sát pool"
+      ],
+      "answerIndex": 1,
+      "explanation": "Công thức từ tài liệu HikariCP giúp tránh hai cực đoan quá nhỏ hoặc quá lớn, nhưng đáp án thật nằm ở số đo của hệ thống cụ thể."
+    },
+    {
+      "question": "Khi thread chờ connection tăng nhưng database đã bão hòa CPU, tăng pool sẽ ra sao?",
+      "options": [
+        "Chữa dứt điểm vấn đề",
+        "Giảm CPU của database",
+        "Chuyển hàng chờ sang database và thường làm độ trễ tổng thể tệ hơn",
+        "Tự động làm truy vấn nhanh hơn"
+      ],
+      "answerIndex": 2,
+      "explanation": "Connection nhiều hơn không tạo thêm năng lực xử lý. Gốc rễ thường là truy vấn chậm hoặc transaction giữ connection quá lâu."
+    },
+    {
+      "question": "Nguyên tắc lập ngân sách timeout nối tiếp là gì?",
+      "options": [
+        "Tổng thời gian của các tầng trong cộng phần đệm phải nhỏ hơn timeout của tầng ngoài",
+        "Mỗi tầng đặt timeout tùy ý",
+        "Tầng trong luôn đặt timeout dài hơn tầng ngoài",
+        "Chỉ gateway cần timeout"
+      ],
+      "answerIndex": 0,
+      "explanation": "Ngân sách nối tiếp ngăn công việc vô ích sau khi request đã bị hủy và giúp lỗi lộ ra ở tầng gây chậm thật sự."
+    },
+    {
+      "question": "Vì sao 5 datasource của Nova cần cấu hình pool riêng?",
+      "options": [
+        "Vì Spring bắt buộc cấu hình khác nhau",
+        "Để file cấu hình dài hơn",
+        "Vì mỗi pool cần một database khác nhau về hãng",
+        "Vì đặc tính tải của giao dịch, báo cáo, legacy, quà và audit khác nhau rõ rệt"
+      ],
+      "answerIndex": 3,
+      "explanation": "Một khuôn mẫu cho mọi tải sẽ làm đói nơi tới hạn hoặc dồn dập nơi mong manh. Cấu hình riêng kèm tên pool rõ ràng giúp vận hành đúng."
+    },
+    {
+      "question": "Metric nào cho thấy pool đang trở thành nút cổ chai?",
+      "options": [
+        "Số lượng bean trong context",
+        "Số thread đang chờ lấy connection tăng kèm thời gian chờ có phân vị cao",
+        "Số dòng code của repository",
+        "Kích thước file log"
+      ],
+      "answerIndex": 1,
+      "explanation": "Thread chờ và thời gian chờ là tín hiệu trực tiếp của cạnh tranh connection, cần đọc cùng số connection đang hoạt động."
+    },
+    {
+      "question": "Thread chờ tăng nhưng connection hoạt động chưa chạm trần gợi ý điều gì?",
+      "options": [
+        "Chắc chắn pool quá nhỏ",
+        "Database đã tắt",
+        "Cần tăng timeout của gateway",
+        "Có thể có rò rỉ connection hoặc transaction giữ connection bất thường ở một đường code khác"
+      ],
+      "answerIndex": 3,
+      "explanation": "Mẫu hình không nhất quán giữa các metric là manh mối chẩn đoán: phải lần theo nơi giữ connection lâu bất thường."
+    },
+    {
+      "question": "Retry ảnh hưởng thế nào tới ngân sách timeout?",
+      "options": [
+        "Không ảnh hưởng",
+        "Retry luôn làm hệ thống nhanh hơn",
+        "Mỗi lần retry tiêu thêm ngân sách, retry không giới hạn sẽ nhân thời gian chờ trong sự cố",
+        "Retry tự động rút ngắn timeout tầng trong"
+      ],
+      "answerIndex": 2,
+      "explanation": "Retry phải có số lần, backoff và ngân sách riêng nằm trong tổng timeout của request, đặc biệt khi lỗi do quá tải."
+    },
+    {
+      "question": "Vai trò của thời gian sống tối đa của connection trong pool là gì?",
+      "options": [
+        "Tái tạo connection định kỳ để tránh connection cũ kỹ, lỗi thời do thay đổi phía database hoặc mạng",
+        "Trang trí cấu hình",
+        "Tăng số connection tối đa",
+        "Thay thế connection timeout"
+      ],
+      "answerIndex": 0,
+      "explanation": "Connection sống quá lâu dễ gặp giới hạn phía database, firewall và thay đổi cấu hình mạng; tái tạo định kỳ giữ pool khỏe mạnh."
+    },
+    {
+      "question": "Datasource legacy qua hệ Java 11 cũ cần chính sách pool thế nào?",
+      "options": [
+        "Pool thật lớn để dồn dập cho nhanh",
+        "Không cần pool",
+        "Pool nhỏ, timeout được tính rộng rãi hơn nhưng có giới hạn rõ, tránh dồn dập hệ cũ mong manh",
+        "Dùng chung pool với core cho tiện"
+      ],
+      "answerIndex": 2,
+      "explanation": "Hệ cũ khó đoán và mong manh: bảo vệ nó bằng đồng thời thấp và ngân sách timeout tường minh là ưu tiên."
+    },
+    {
+      "question": "Bằng chứng nào cho thấy việc tăng pool là đúng quyết định?",
+      "options": [
+        "Cảm giác hệ thống nhanh hơn",
+        "Độ trễ đầu-cuối và thời gian chờ connection cùng cải thiện trên cùng kịch bản tải, trong khi database chưa bão hòa",
+        "Số connection tối đa trong cấu hình lớn hơn",
+        "Không còn ai phàn nàn trong một giờ đầu"
+      ],
+      "answerIndex": 1,
+      "explanation": "Quyết định pool phải được hậu thuẫn bằng số đo đầu-cuối, không phải bằng một metric đơn lẻ hay cảm tính."
+    }
+  ]
+}

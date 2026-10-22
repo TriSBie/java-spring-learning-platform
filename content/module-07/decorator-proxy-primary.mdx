@@ -1,0 +1,182 @@
+---
+title: "Decorator qua Spring Proxy và Primary Bean"
+module: 7
+level: "Middle"
+duration: 50
+order: 4
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Giải thích được cơ chế Spring tạo proxy quanh bean và phân biệt được Decorator thủ công với proxy do container quản lý.
+- Cài đặt được một decorator thêm caching và một decorator thêm logging bọc quanh points service mà không sửa service gốc.
+- Dùng đúng `@Primary` và qualifier để kiểm soát bean nào được tiêm vào nơi gọi khi có nhiều ứng viên cùng type.
+
+## Vì sao cần biết
+
+Points service của Nova Loyalty được gọi từ gateway qua các route `/v4/{gs,os,ws}/*` với lưu lượng rất khác nhau giữa giờ cao điểm bán lẻ và giờ thấp điểm. Đội vận hành muốn thêm cache cho truy vấn số dư và logging có cấu trúc cho mọi lần trừ điểm, nhưng service lõi đang ổn định và không ai muốn nhồi thêm hai mối quan tâm cắt ngang vào code nghiệp vụ. Decorator qua proxy cho phép bọc hành vi mới quanh bean hiện có — Nova Loyalty tận dụng đúng cơ chế mà chính Spring dùng cho transaction và security — trong khi `@Primary` quyết định bản đã bọc hay bản gốc được tiêm cho từng nơi gọi.
+
+## Nội dung chính
+
+### Vấn đề
+
+Service lõi cần thêm caching và logging nhưng đang ổn định.
+Sửa trực tiếp service lõi trộn nghiệp vụ với mối quan tâm kỹ thuật.
+Nhiều nơi gọi khác nhau lại cần tổ hợp hành vi khác nhau: có nơi cần cache, có nơi cần dữ liệu tươi tuyệt đối.
+Nếu không kiểm soát, việc tiêm bean trở nên mơ hồ khi có nhiều bean cùng type.
+
+### Giải pháp
+
+Tạo các class cùng interface với service gốc, mỗi class bọc một hành vi bổ sung và ủy quyền cho bean bên trong.
+Class bọc cũng là bean nên Spring tiêm chúng như service bình thường.
+Dùng qualifier để nơi gọi chọn đúng biến thể, và `@Primary` cho biến thể mặc định.
+Thứ tự bọc quyết định hành vi: cache ở ngoài cùng sẽ chặn cả logging của các lần trúng cache.
+
+<Mermaid chart={`flowchart LR
+  Caller[Nơi gọi] --> Cache[CacheDecorator]
+  Cache --> Log[LoggingDecorator]
+  Log --> Core[PointsService lõi]
+  Core --> DB[(Datasource core)]`} label="Chuỗi decorator: cache ngoài cùng, logging ở giữa, service lõi trong cùng" />
+
+Spring proxy là họ hàng gần của Decorator.
+Khi ta đánh dấu transactional hay cache bằng annotation, container tạo proxy bọc bean thật.
+Hiểu cơ chế này giúp tránh lỗi self-invocation: lời gọi nội bộ trong cùng class không đi qua proxy.
+
+### Trade-off
+
+Ưu điểm là thêm hành vi mà không sửa code lõi, tổ hợp linh hoạt theo nơi gọi.
+Nhược điểm là stack hành vi khó nhìn: phải lần qua nhiều lớp bọc mới tới logic thật.
+Lạm dụng `@Primary` che giấu mơ hồ thiết kế; qualifier tường minh thường rõ ràng hơn cho biến thể đặc thù.
+Khi số lớp bọc tăng, nên cân nhắc dùng cơ chế annotation và AOP có sẵn của Spring thay vì bọc thủ công.
+
+## Code
+
+Package mẫu là `com.nova.loyalty.points`. Dependency: `spring-boot-starter` là đủ cho phần decorator thủ công.
+
+```java filename=CachingPointsService.java
+package com.nova.loyalty.points;
+
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.annotation.Primary;
+import org.springframework.stereotype.Service;
+
+public interface PointsQueryService {
+    long getBalance(String memberId);
+}
+
+@Service("corePointsQueryService")
+class CorePointsQueryService implements PointsQueryService {
+    @Override
+    public long getBalance(String memberId) {
+        return 42_000L;
+    }
+}
+
+@Primary
+@Service("cachingPointsQueryService")
+class CachingPointsQueryService implements PointsQueryService {
+
+    private final PointsQueryService delegate;
+    private final ConcurrentMap<String, Long> cache = new ConcurrentHashMap<>();
+
+    public CachingPointsQueryService(
+            @Qualifier("loggingPointsQueryService") PointsQueryService delegate) {
+        this.delegate = delegate;
+    }
+
+    @Override
+    public long getBalance(String memberId) {
+        return cache.computeIfAbsent(memberId, delegate::getBalance);
+    }
+
+    public void evict(String memberId) {
+        cache.remove(memberId);
+    }
+}
+```
+
+```java filename=LoggingPointsService.java
+package com.nova.loyalty.points;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.stereotype.Service;
+
+@Service("loggingPointsQueryService")
+class LoggingPointsQueryService implements PointsQueryService {
+
+    private static final Logger log = LoggerFactory.getLogger(LoggingPointsQueryService.class);
+
+    private final PointsQueryService delegate;
+
+    public LoggingPointsQueryService(
+            @Qualifier("corePointsQueryService") PointsQueryService delegate) {
+        this.delegate = delegate;
+    }
+
+    @Override
+    public long getBalance(String memberId) {
+        long started = System.nanoTime();
+        long balance = delegate.getBalance(memberId);
+        long elapsedMs = (System.nanoTime() - started) / 1_000_000L;
+        log.info("getBalance memberId={} balance={} elapsedMs={}", memberId, balance, elapsedMs);
+        return balance;
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Đánh dấu Primary cho mọi biến thể
+
+- **Triệu chứng:** Ứng dụng không khởi động được hoặc nơi gọi nhận nhầm biến thể không có cache.
+- **Nguyên nhân:** Nhiều bean cùng được coi là mặc định khiến lựa chọn của container trở nên mơ hồ.
+- **Fix:** Chỉ một biến thể được là mặc định; các biến thể còn lại phải được chọn bằng qualifier tường minh.
+
+### 2. Quên evict cache sau khi trừ điểm
+
+- **Triệu chứng:** Số dư hiển thị cũ sau khi khách vừa đổi quà thành công.
+- **Nguyên nhân:** Decorator cache giữ giá trị trước giao dịch và không có cơ chế vô hiệu hóa khi số dư thay đổi.
+- **Fix:** Vô hiệu hóa cache trong cùng luồng nghiệp vụ thay đổi điểm, hoặc đặt thời gian sống ngắn và chấp nhận cửa sổ lệch đã được thống nhất.
+
+### 3. Nhầm lẫn self-invocation với decorator
+
+- **Triệu chứng:** Logging không xuất hiện cho các lời gọi nội bộ trong cùng service.
+- **Nguyên nhân:** Lời gọi nội bộ không đi qua bean bọc bên ngoài, dù nhìn code tưởng mọi method đều được bọc.
+- **Fix:** Tách phần cần bọc ra bean riêng hoặc tiêm chính biến thể đã bọc qua qualifier rõ ràng.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Vẽ sơ đồ:** Vẽ chuỗi bọc cho hai nơi gọi khác nhau: API đọc số dư cần cache, job đối soát cần dữ liệu tươi và logging đầy đủ.
+2. **Đọc code:** Đảo thứ tự cache và logging trong chuỗi bọc thì log thay đổi thế nào với các lần trúng cache? Giải thích.
+3. **Viết tay:** Viết thêm một decorator đo số lần gọi và thử nghiệm hành vi khi thành viên bị khóa ví.
+4. **Phản biện:** Khi nào nên dùng annotation cache có sẵn của Spring thay vì decorator thủ công? Nêu tiêu chí quyết định.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Framework — Proxy và AOP Concepts: https://docs.spring.io/spring-framework/reference/core/aop/introduction-proxies.html
+- Spring Framework — Bean Definition và Primary: https://docs.spring.io/spring-framework/reference/core/beans/definition.html
+- Spring Boot — Reference Documentation: https://docs.spring.io/spring-boot/reference/
+
+## Đọc thêm
+
+Không có.

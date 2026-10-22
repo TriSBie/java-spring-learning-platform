@@ -1,0 +1,183 @@
+---
+title: "HTTP/2, TLS termination và mTLS nhập môn"
+module: 5
+level: "Middle"
+duration: 45
+order: 2
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- So sánh được HTTP/1.1 và HTTP/2 ở các điểm quyết định cho backend: multiplexing, nén header bằng HPACK, và head-of-line blocking ở tầng TCP.
+- Giải thích được TLS termination tại load balancer/gateway là gì, và hệ quả của việc đoạn đường còn lại chạy HTTP thuần trong mạng nội bộ.
+- Mô tả được mTLS ở mức nhập môn: hai phía cùng xác thực bằng chứng thư, và khi nào Nova Loyalty nên cân nhắc nó cho traffic nội bộ.
+
+## Vì sao cần biết
+
+Traffic vào Nova Loyalty đi qua gateway với các route `/v4/{gs,os,ws}/*` phía sau một load balancer. Quyết định TLS kết thúc ở đâu và đoạn nội bộ chạy giao thức gì ảnh hưởng trực tiếp tới độ trễ, khả năng gỡ lỗi và bề mặt bảo mật: nếu TLS termination ở load balancer mà đội ngũ lại tưởng traffic nội bộ vẫn được mã hóa, dữ liệu điểm của khách hàng có thể đang chạy dạng rõ trong một đoạn mạng mà không ai để ý. Ngược lại, bắt mọi hop nội bộ đều bắt tay TLS đầy đủ mà không có cơ chế tái sử dụng kết nối sẽ trả chi phí độ trễ không cần thiết ở giờ cao điểm.
+
+## Nội dung chính
+
+### HTTP/1.1: giới hạn của mô hình tuần tự
+
+HTTP/1.1 truyền request/response dạng văn bản, header lặp lại gần như nguyên vẹn ở mỗi request. Trên một kết nối, response phải trả theo thứ tự request (pipelining hiếm khi dùng được trong thực tế), nên trình duyệt và client thường mở nhiều kết nối song song để tăng thông lượng. Mỗi kết nối là một lần bắt tay TCP và TLS riêng.
+
+Với API giữa các service, giới hạn này thể hiện ở chi phí header lặp lại và việc một response chậm có thể chặn các request phía sau trên cùng kết nối ở tầng ứng dụng.
+
+### HTTP/2: multiplexing và HPACK
+
+HTTP/2 thay đổi cách đóng khung (framing):
+
+- Multiplexing: nhiều stream (request/response) chạy đồng thời trên cùng một kết nối TCP, mỗi stream có id riêng; frame của các stream có thể xen kẽ nhau.
+- HPACK: header được nén bằng bảng tĩnh và bảng động dùng chung giữa hai phía, giảm mạnh chi phí lặp lại của các header giống nhau như `Authorization`.
+- Server push từng được quảng bá nhưng nay ít dùng trong thực tế API; điều quan trọng với backend là multiplexing và nén header.
+
+Cần nhớ giới hạn còn lại: mất một gói tin ở tầng TCP vẫn chặn mọi stream trên kết nối đó ở tầng vận chuyển (head-of-line blocking ở tầng TCP). Đây là một trong các động lực của HTTP/3 trên QUIC, nằm ngoài phạm vi bài này.
+
+<Mermaid chart={`flowchart LR
+  subgraph H1[HTTP/1.1]
+    A1[Ket noi 1 - request A] --> B1[Response A]
+    A2[Ket noi 2 - request B] --> B2[Response B]
+  end
+  subgraph H2[HTTP/2]
+    C[Mot ket noi TCP] --> D[Stream 1]
+    C --> E[Stream 3]
+    C --> F[Stream 5]
+  end
+`} label="HTTP/2 gộp nhiều stream trên một kết nối nhờ multiplexing, thay vì mở nhiều kết nối như HTTP/1.1." />
+
+### TLS và bắt tay TLS
+
+TLS cung cấp mã hóa, toàn vẹn và xác thực máy chủ bằng chứng thư. Bắt tay TLS thiết lập khóa phiên sau khi hai phía thỏa thuận tham số và phía client kiểm chứng chứng thư của server. Bắt tay đầy đủ tốn thêm vòng đi về; các cơ chế nối lại phiên (session resumption) và tái sử dụng kết nối giúp giảm chi phí này cho các lời gọi lặp lại.
+
+### TLS termination tại LB/gateway
+
+TLS termination nghĩa là kết nối TLS từ client kết thúc tại load balancer hoặc gateway: thành phần này giải mã, rồi chuyển tiếp request vào mạng nội bộ, thường bằng HTTP thuần hoặc một kết nối TLS mới riêng (trường hợp đó gọi là re-encryption). Lợi ích: quản lý chứng thư tập trung, giảm tải mã hóa cho backend, và có một điểm duy nhất để áp chính sách.
+
+Hệ quả phải quản trị rõ:
+
+- Đoạn LB tới backend nếu chạy HTTP thuần thì dữ liệu dạng rõ trong đoạn đó; quyết định này chỉ chấp nhận được khi biên mạng nội bộ được kiểm soát và đã được ghi thành văn bản.
+- Backend mất khả năng nhìn thấy thông tin trong lớp TLS của client, ví dụ chứng thư client; các thông tin cần thiết như IP thật phải được chuyển qua header tin cậy (nội dung này nối tiếp ở bài SNAT).
+- Gateway trở thành điểm tập trung rủi ro: cấu hình TLS yếu ở đây ảnh hưởng toàn bộ hệ thống.
+
+### mTLS nhập môn
+
+Mutual TLS (mTLS) mở rộng TLS một chiều: cả server và client đều trình chứng thư và cùng xác thực lẫn nhau. Trong mạng microservice, mTLS thường do service mesh hoặc hạ tầng cấp phát chứng thư tự động đảm nhiệm, cho phép một service khẳng định "tôi là service điểm" ở tầng vận chuyển, bổ sung cho token ở tầng ứng dụng (xem bài service-to-service auth ở Module 06).
+
+mTLS không miễn phí: phải có hạ tầng cấp, xoay vòng và thu hồi chứng thư. Đội nhỏ chưa có hạ tầng này nên ưu tiên làm tốt token nội bộ và biên mạng trước, rồi mới cân nhắc mTLS cho các hop nhạy cảm nhất.
+
+### ALPN: cách hai phía thống nhất giao thức
+
+Khi một kết nối TLS được thiết lập, client và server cần thống nhất chúng sẽ nói HTTP/2 hay HTTP/1.1 trên kết nối đã mã hóa đó. Cơ chế cho việc này là ALPN (Application-Layer Protocol Negotiation), một phần mở rộng của bắt tay TLS:
+
+- Client gửi danh sách giao thức nó hỗ trợ theo thứ tự ưu tiên.
+- Server chọn một giao thức từ danh sách đó và thông báo lại ngay trong bắt tay.
+- Cả hai phía sau đó đóng khung dữ liệu theo đúng giao thức đã chọn, không cần thêm vòng thỏa thuận riêng.
+
+Khi ALPN không thống nhất được giao thức chung, kết nối quay về lựa chọn an toàn hơn hoặc thất bại tùy cấu hình. Đây là lý do một số sự cố "đã bật HTTP/2 nhưng traffic vẫn là HTTP/1.1" thường nằm ở tầng proxy hoặc ở khả năng ALPN của thư viện, không nằm ở logic ứng dụng.
+
+## Code
+
+Bật HTTP/2 và HTTPS trực tiếp trên Spring Boot cho các trường hợp service tự kết thúc TLS (ví dụ service nội bộ không đứng sau gateway TLS termination). Cấu hình bằng `application.yml`:
+
+```yaml filename=application.yml
+server:
+  port: 8443
+  http2:
+    enabled: true
+  ssl:
+    key-store: classpath:keystore.p12
+    key-store-type: PKCS12
+    key-store-password: ${KEYSTORE_PASSWORD}
+    key-alias: nova-loyalty
+  forward-headers-strategy: framework
+spring:
+  application:
+    name: nova-points-service
+```
+
+Cấu hình client `RestClient` ưu tiên HTTP/2 khi gọi service nội bộ hỗ trợ nó, giữ nguyên kỷ luật timeout của bài trước:
+
+```java filename=InternalClientConfig.java
+package com.nova.loyalty.http;
+
+import java.net.http.HttpClient;
+import java.time.Duration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
+import org.springframework.web.client.RestClient;
+
+@Configuration
+public class InternalClientConfig {
+
+    @Bean
+    public RestClient internalRestClient(RestClient.Builder builder) {
+        HttpClient httpClient = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_2)
+                .connectTimeout(Duration.ofSeconds(2))
+                .build();
+        JdkClientHttpRequestFactory factory = new JdkClientHttpRequestFactory(httpClient);
+        factory.setReadTimeout(Duration.ofSeconds(5));
+        return builder
+                .baseUrl("https://points.internal.nova.example.com")
+                .requestFactory(factory)
+                .build();
+    }
+}
+```
+
+> [!WARNING] Cần verify với docs version Spring Boot 3.3.x: hành vi mặc định của HTTP/2 khi chạy sau reverse proxy (h2c, upgrade) và các khóa cấu hình SSL có chi tiết riêng; đối chiếu tài liệu của đúng bản trước khi áp dụng production.
+
+## Sai lầm thường gặp
+
+### 1. Tưởng traffic nội bộ vẫn mã hóa sau TLS termination
+
+- **Triệu chứng:** Audit phát hiện đoạn LB tới backend chạy HTTP thuần trong khi tài liệu kiến trúc ghi toàn tuyến được mã hóa.
+- **Nguyên nhân:** Không phân biệt termination (kết thúc TLS tại LB) với re-encryption (mã hóa lại cho hop sau).
+- **Fix:** Ghi rõ cho từng hop giao thức và trạng thái mã hóa trong tài liệu kiến trúc; nếu yêu cầu mã hóa toàn tuyến, cấu hình re-encryption hoặc TLS trực tiếp tới backend.
+
+### 2. Kỳ vọng HTTP/2 xóa mọi head-of-line blocking
+
+- **Triệu chứng:** Chuyển sang HTTP/2 nhưng khi mạng mất gói, mọi stream trên kết nối vẫn chậm đồng loạt một cách khó hiểu.
+- **Nguyên nhân:** Multiplexing xóa chặn ở tầng ứng dụng, nhưng mất gói ở tầng TCP vẫn chặn việc phân phối dữ liệu cho mọi stream của kết nối đó.
+- **Fix:** Hiểu đúng phạm vi của HTTP/2; khi đánh giá sự cố, kiểm tra cả chỉ số mất gói và retransmission ở tầng mạng.
+
+### 3. Triển khai mTLS thủ công không có vòng đời chứng thư
+
+- **Triệu chứng:** Chứng thư hết hạn đồng loạt gây outage, hoặc chứng thư bị lộ nhưng không có cách thu hồi.
+- **Nguyên nhân:** Chỉ làm phần bắt tay mà bỏ qua hạ tầng cấp phát, xoay vòng tự động và thu hồi chứng thư.
+- **Fix:** Chỉ triển khai mTLS khi có cơ chế quản lý vòng đời chứng thư rõ ràng (thường qua mesh hoặc PKI nội bộ); bắt đầu với các hop nhạy cảm nhất.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được; trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay, không có chấm tự động.
+
+1. Lập bảng so sánh HTTP/1.1 và HTTP/2 theo các tiêu chí: số kết nối, cách gửi header, thứ tự response, điểm nghẽn còn lại.
+2. Vẽ sơ đồ tuyến request vào Nova Loyalty qua gateway `/v4/{gs,os,ws}/*`, ghi rõ từng hop dùng giao thức gì và TLS kết thúc ở đâu theo thiết kế bạn đề xuất.
+3. Viết đoạn đánh đổi ngắn: Nova nên chọn termination kèm HTTP nội bộ, termination kèm re-encryption, hay TLS toàn tuyến; nêu điều kiện khiến bạn đổi lựa chọn.
+4. Liệt kê các tiền đề hạ tầng cần có trước khi bật mTLS cho traffic giữa service điểm và service quà, theo thứ tự ưu tiên.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- RFC 9113 — HTTP/2: https://datatracker.ietf.org/doc/html/rfc9113
+- RFC 8446 — TLS 1.3: https://datatracker.ietf.org/doc/html/rfc8446
+- Spring Boot — HTTP/2 và SSL trong Embedded Web Servers: https://docs.spring.io/spring-boot/reference/web/servlet.html
+
+## Đọc thêm
+
+Không có.

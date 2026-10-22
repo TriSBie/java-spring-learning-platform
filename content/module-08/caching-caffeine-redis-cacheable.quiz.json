@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Phân biệt được cache trong tiến trình và cache phân tán theo độ trễ, nhất quán và chi phí vận hành.",
+    "Cấu hình được Caffeine và Redis làm hai tầng cache với thời gian sống riêng.",
+    "Dùng đúng bộ ba annotation đọc, ghi và xóa cache theo luồng nghiệp vụ.",
+    "Tránh và chẩn đoán được lỗi self-invocation với annotation qua proxy.",
+    "Thiết kế được khóa cache đầy đủ tham số cho dữ liệu nhiều nguồn ví.",
+    "Gắn được vô hiệu hóa cache vào luồng ghi thay đổi điểm của Nova Loyalty."
+  ],
+  "quiz": [
+    {
+      "question": "Cache trong tiến trình như Caffeine thắng Redis ở điểm nào?",
+      "options": [
+        "Luôn nhất quán giữa các instance",
+        "Độ trễ thấp nhất vì không cần một vòng mạng",
+        "Không cần vô hiệu hóa bao giờ",
+        "Dung lượng không giới hạn"
+      ],
+      "answerIndex": 1,
+      "explanation": "Không qua mạng là lợi thế lớn nhất của tầng nội bộ. Cái giá là mỗi instance giữ bản sao riêng và có thể lệch nhau tạm thời."
+    },
+    {
+      "question": "Self-invocation làm annotation cache thất bại vì lý do gì?",
+      "options": [
+        "Vì Caffeine không hỗ trợ annotation",
+        "Vì khóa cache quá dài",
+        "Vì lời gọi nội bộ không đi qua proxy của Spring nơi logic cache được áp dụng",
+        "Vì Redis chưa khởi động"
+      ],
+      "answerIndex": 2,
+      "explanation": "Cache abstraction hoạt động qua proxy quanh bean. Gọi nội bộ bằng tham chiếu trực tiếp bỏ qua hoàn toàn lớp proxy đó."
+    },
+    {
+      "question": "Khóa cache cho dữ liệu điểm của Nova bắt buộc chứa gì ngoài mã thành viên?",
+      "options": [
+        "Nguồn ví, vì cùng một thành viên có 3 nguồn ví với dữ liệu khác nhau",
+        "Tên developer",
+        "Thời gian hiện tại",
+        "Tên instance đang xử lý"
+      ],
+      "answerIndex": 0,
+      "explanation": "Khóa thiếu tham số phân biệt kết quả sẽ trộn dữ liệu giữa các ví — lỗi nghiệp vụ nghiêm trọng dù cache chạy rất nhanh."
+    },
+    {
+      "question": "Thời gian sống của cache nên được quyết định dựa trên cơ sở nào?",
+      "options": [
+        "Càng dài càng tốt để tiết kiệm database",
+        "Mặc định của thư viện là đủ cho mọi trường hợp",
+        "Kích thước file cấu hình",
+        "Cửa sổ dữ liệu cũ tối đa mà nghiệp vụ chấp nhận được cho loại dữ liệu đó"
+      ],
+      "answerIndex": 3,
+      "explanation": "TTL là hợp đồng nghiệp vụ về độ tươi. Dữ liệu số dư sau giao dịch cần kỷ luật vô hiệu hóa chặt hơn dữ liệu tham chiếu ít thay đổi."
+    },
+    {
+      "question": "Luồng ghi thay đổi điểm phải làm gì với cache liên quan?",
+      "options": [
+        "Không cần làm gì, chờ hết thời gian sống",
+        "Vô hiệu hóa hoặc cập nhật mục cache tương ứng như một phần của thiết kế luồng ghi",
+        "Xóa toàn bộ mọi cache của hệ thống",
+        "Tắt cache trong giờ cao điểm"
+      ],
+      "answerIndex": 1,
+      "explanation": "Chờ TTL làm cửa sổ sai dữ liệu kéo dài tùy tiện. Luồng ghi là nơi biết chính xác dữ liệu nào vừa thay đổi."
+    },
+    {
+      "question": "Hiện tượng dồn dập xuống database khi một khóa nóng hết hạn gọi là gì và xử lý thế nào?",
+      "options": [
+        "Cache warming, xử lý bằng cách tăng TTL vô hạn",
+        "Lỗi self-invocation",
+        "Hiện tượng bình thường không cần xử lý",
+        "Nhiều request cùng nạp lại một khóa, cần đồng bộ việc nạp hoặc gia hạn sớm có kiểm soát"
+      ],
+      "answerIndex": 3,
+      "explanation": "Khi khóa nóng trượt đồng loạt, database nhận cú sốc tải. Đồng bộ nạp theo khóa giúp chỉ một request đi nạp thật."
+    },
+    {
+      "question": "Vì sao không nên cache giá trị null một cách mặc định?",
+      "options": [
+        "Null không lưu được vào Redis",
+        "Null làm tăng độ trễ",
+        "Cache null che giấu lỗi và biến truy vấn không tồn tại thành kết quả hợp lệ trong suốt thời gian sống",
+        "Spring cấm cache null"
+      ],
+      "answerIndex": 2,
+      "explanation": "Cần quyết định tường minh: cache vắng mặt có thể chống tấn công dò quét trong vài trường hợp, nhưng mặc định nuốt null sẽ che lỗi dữ liệu."
+    },
+    {
+      "question": "Tỉ lệ trúng cache cao có đảm bảo cache đang đúng không?",
+      "options": [
+        "Không: khóa sai hoặc vô hiệu hóa thiếu vẫn cho dữ liệu sai với tỉ lệ trúng rất cao",
+        "Có, tỉ lệ cao là đủ",
+        "Chỉ cần thêm tỉ lệ trúng của Redis",
+        "Đúng nếu độ trễ giảm"
+      ],
+      "answerIndex": 0,
+      "explanation": "Hiệu quả và đúng đắn là hai trục khác nhau. Cache nhanh mà sai dữ liệu là lỗi nghiệp vụ, phải kiểm chứng bằng kịch bản ghi rồi đọc."
+    },
+    {
+      "question": "Dữ liệu nào hợp với tầng Redis dùng chung hơn tầng Caffeine?",
+      "options": [
+        "Dữ liệu chỉ một instance dùng và chịu lệch dài",
+        "Dữ liệu bí mật không được rời tiến trình trong mọi trường hợp",
+        "Dữ liệu cần nhất quán tương đối giữa các instance và vô hiệu hóa tập trung",
+        "Dữ liệu tính toán lại cực rẻ"
+      ],
+      "answerIndex": 2,
+      "explanation": "Redis cho một bản dùng chung và điểm vô hiệu hóa tập trung, đổi lại là độ trễ mạng cho mỗi lần truy cập."
+    },
+    {
+      "question": "Cách kiểm chứng cache hoạt động thật sau khi thêm annotation là gì?",
+      "options": [
+        "Đọc code và tin tưởng proxy",
+        "Đo metric cache và số lần chạm database qua các lần gọi lặp lại, kèm kịch bản ghi rồi đọc",
+        "Chỉ kiểm tra ứng dụng khởi động thành công",
+        "Tăng thời gian sống rồi quan sát cảm tính"
+      ],
+      "answerIndex": 1,
+      "explanation": "Annotation lỗi thường im lặng. Chỉ số đo hành vi qua nhiều lần gọi mới chứng minh cache thật sự có hiệu lực."
+    }
+  ]
+}

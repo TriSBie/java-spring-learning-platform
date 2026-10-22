@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Giải thích được cách DNS trong Kubernetes phân giải tên Service thành địa chỉ của Service hoặc pod.",
+    "Phân biệt được service discovery phía server và phía client.",
+    "Tách bạch được readiness probe và liveness probe cùng hậu quả khi nhầm lẫn.",
+    "So sánh được load balancer L4 và L7 theo khả năng định tuyến.",
+    "Chọn được thuật toán chia tải phù hợp cho từng kịch bản traffic.",
+    "Cấu hình được Actuator readiness group và probe trong YAML Kubernetes."
+  ],
+  "quiz": [
+    {
+      "answerIndex": 2,
+      "explanation": "Trong cùng namespace, tên ngắn của Service phân giải qua DNS của cluster tới địa chỉ của Service đó.",
+      "options": [
+        "Địa chỉ của node chạy pod đầu tiên",
+        "Địa chỉ IP của một pod cố định",
+        "Địa chỉ ảo (ClusterIP) của Service, hoặc danh sách IP pod với headless service",
+        "Địa chỉ gateway bên ngoài cluster"
+      ],
+      "question": "Tên DNS của một Service trong Kubernetes thường phân giải thành gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Server-side discovery để hạ tầng (Service/LB) chọn backend; client-side bắt ứng dụng tự lấy danh sách instance và tự chọn.",
+      "options": [
+        "Hai tên gọi của cùng một cơ chế",
+        "Server-side: hạ tầng chọn pod đích qua địa chỉ ổn định; client-side: ứng dụng tự lấy danh sách và tự chọn",
+        "Chỉ khác nhau ở giao thức DNS",
+        "Client-side do Kubernetes làm, server-side do ứng dụng làm"
+      ],
+      "question": "Khác biệt giữa service discovery phía server và phía client là gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Readiness quyết định pod có nằm trong danh sách endpoint nhận traffic của Service hay không.",
+      "options": [
+        "Pod có được cấp thêm CPU hay không",
+        "Pod có nằm trong danh sách nhận traffic của Service hay không",
+        "Pod có bị xóa khỏi cluster hay không",
+        "Image của pod có được pull hay không"
+      ],
+      "question": "Readiness probe quyết định điều gì?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Liveness kiểm tra tiến trình còn sống để quyết định khởi động lại; đưa phụ thuộc bên ngoài vào đây gây vòng lặp giết pod khi downstream chậm.",
+      "options": [
+        "Liveness quyết định khởi động lại pod, readiness quyết định pod có nhận traffic hay không",
+        "Readiness dùng cho database, liveness dùng cho Kafka",
+        "Liveness chạy trước readiness một lần duy nhất",
+        "Chúng là một, chỉ khác tên trong YAML"
+      ],
+      "question": "Liveness probe khác readiness probe ở điểm nào?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "L7 hiểu HTTP nên định tuyến được theo path như các route của gateway, còn L4 chỉ nhìn kết nối ở tầng vận chuyển.",
+      "options": [
+        "L7 hiểu HTTP và định tuyến theo path/header được, L4 chỉ chia theo kết nối tầng vận chuyển",
+        "L4 dùng cho nội bộ, L7 bắt buộc dùng cho Kafka",
+        "L4 nhanh hơn nên luôn tốt hơn cho mọi API",
+        "L7 không cần load balancer phần cứng"
+      ],
+      "question": "Khác biệt chính giữa load balancer L4 và L7 là gì?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Khi thời gian xử lý chênh lệch lớn, least connections tránh dồn thêm việc vào pod đang bận nhất, điều round robin không nhìn thấy.",
+      "options": [
+        "Consistent hashing theo thời gian trong ngày",
+        "Sticky theo IP client",
+        "Round robin luôn tốt nhất trong mọi trường hợp",
+        "Least connections, vì nó ưu tiên pod đang ít bận hơn"
+      ],
+      "question": "Thuật toán chia tải nào hợp khi thời gian xử lý request chênh lệch lớn giữa các request?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "IP của pod thay đổi theo vòng đời; gọi qua tên Service để hạ tầng duy trì endpoint đúng theo readiness.",
+      "options": [
+        "Vì IP của pod là bí mật bảo mật",
+        "Vì DNS nhanh hơn IP trực tiếp",
+        "Vì Kubernetes cấm gọi theo IP",
+        "Vì pod có IP thay đổi theo vòng đời, phải gọi qua tên DNS ổn định của Service"
+      ],
+      "question": "Vì sao không nên cứng địa chỉ IP của pod trong cấu hình client?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Cache DNS dài ở phía client khiến nó tiếp tục dùng địa chỉ cũ sau khi backend đã thay đổi, gây lỗi rải rác khó tái hiện.",
+      "options": [
+        "Trình duyệt chặn mọi request nội bộ",
+        "DNS sẽ tự xóa Service",
+        "Client tiếp tục gọi địa chỉ cũ sau khi backend thay đổi trong một thời gian",
+        "Pod mới không khởi động được"
+      ],
+      "question": "Cache DNS phía client quá lâu gây hậu quả gì?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Headless service không có ClusterIP; DNS trả trực tiếp danh sách IP pod để client tự làm discovery và chọn đích.",
+      "options": [
+        "Service không cấp ClusterIP, DNS trả thẳng danh sách IP của các pod",
+        "Service chỉ dùng cho traffic bên ngoài",
+        "Service tự động bật mTLS",
+        "Service không có selector"
+      ],
+      "question": "Headless service khác Service thường ở điểm nào?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Sticky/consistent hashing giữ một khóa về cùng backend, đánh đổi phân bổ đều; chỉ dùng khi có trạng thái cục bộ thật sự cần nó.",
+      "options": [
+        "Khi mọi request đều giống hệt nhau",
+        "Khi thực sự có trạng thái cục bộ gắn với một khóa như member id, chấp nhận đánh đổi độ đều của tải",
+        "Khi muốn giảm số lượng pod",
+        "Mặc định cho mọi API nội bộ"
+      ],
+      "question": "Khi nào nên dùng sticky hoặc consistent hashing?"
+    }
+  ]
+}

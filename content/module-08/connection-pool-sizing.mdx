@@ -1,0 +1,180 @@
+---
+title: "Định Cỡ Connection Pool và Ngân Sách Timeout"
+module: 8
+level: "Middle"
+duration: 50
+order: 3
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Hibernate 6.5.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Giải thích được vì sao pool lớn hơn không đồng nghĩa nhanh hơn và áp dụng được công thức heuristic thường được trích từ tài liệu HikariCP làm điểm khởi đầu.
+- Lập được ngân sách timeout nối tiếp cho một request đi qua gateway và nhiều datasource, đảm bảo tổng timeout tầng trong nhỏ hơn timeout tầng ngoài.
+- Cấu hình được pool riêng cho 5 datasource của Nova Loyalty theo đặc tính tải của từng datasource và giám sát được dấu hiệu pool cạn.
+
+## Vì sao cần biết
+
+Nova Loyalty có 5 datasource HikariCP độc lập — `core`, `gift`, `report`, `legacy`, `audit` — và không dùng JTA. Mỗi datasource là một ngân sách connection riêng: pool của `report` bị báo cáo nặng chiếm hết không được phép làm đói `core`, và một request qua gateway `/v4/{gs,os,ws}/*` có thể chạm nhiều pool nối tiếp. Sai lầm đắt giá nhất của team từng là tăng pool lên thật lớn khi thấy request chờ connection, trong khi gốc rễ là câu truy vấn chậm giữ connection quá lâu. Bài này dạy cách định cỡ pool bằng lập luận và công thức heuristic, lập ngân sách timeout chặt chẽ, rồi tự đo lại bằng metric thật.
+
+## Nội dung chính
+
+### Vì sao pool lớn không chữa được bệnh chậm
+
+Connection là tài nguyên đắt ở phía database: mỗi connection chiếm bộ nhớ và năng lực xử lý.
+Khi pool tăng quá mức, database phải chia CPU cho quá nhiều phiên đồng thời và từng truy vấn đều chậm hơn.
+Dấu hiệu kinh điển là request chờ connection trong khi database đã bão hòa CPU.
+Lúc đó tăng pool chỉ chuyển hàng chờ từ ứng dụng sang database và làm tổng thể tệ hơn.
+
+Công thức heuristic thường được trích từ tài liệu HikariCP cho điểm khởi đầu như sau: số connection xấp xỉ bằng số nhân CPU nhân hai cộng với số trục đĩa hiệu dụng.
+Với database chạy trên lưu trữ hiện đại, thành phần đĩa gần như không còn ý nghĩa như thời đĩa quay.
+Công thức chỉ là điểm bắt đầu để đo, tuyệt đối không phải đáp án cuối cho mọi hệ thống.
+
+### Định cỡ theo từng datasource tại Nova
+
+Datasource `core` phục vụ giao dịch điểm ngắn và tới hạn, cần độ trễ lấy connection thấp.
+Datasource `report` chạy truy vấn dài, nên pool nhỏ hơn và có timeout riêng để tự bảo vệ.
+Datasource `legacy` nối tới hệ Java 11 cũ qua interceptor, độ trễ khó đoán nên ngân sách timeout phải rộng rãi hơn nhưng pool phải nhỏ để tránh dồn dập hệ cũ.
+Datasource `audit` ghi append-only với tải ổn định, ưu tiên không mất ghi nhận hơn là độ trễ.
+Mỗi pool cần metric riêng về số connection đang dùng, số thread đang chờ và thời gian chờ.
+
+### Ngân sách timeout nối tiếp
+
+Timeout phải được lập ngân sách như tiền: tầng ngoài giữ tổng ngân sách, các tầng trong chia nhau phần nhỏ hơn.
+Thời gian chờ lấy connection cộng thời gian chạy truy vấn cộng thời gian gọi dịch vụ ngoài phải nhỏ hơn timeout của request.
+Nếu tầng trong có timeout dài hơn tầng ngoài, request đã bị hủy ở ngoài nhưng công việc bên trong vẫn chạy và giữ tài nguyên.
+Retry không có ngân sách riêng sẽ nhân thời gian chờ lên nhiều lần trong sự cố.
+
+<Mermaid chart={`flowchart LR
+  GW[Gateway timeout tổng] --> API[API xử lý]
+  API --> Pool[Chờ connection pool]
+  Pool --> DB[Chạy truy vấn]
+  DB --> Legacy[Gọi hệ legacy khi cần]`} label="Ngân sách timeout nối tiếp: mỗi tầng trong phải nhỏ hơn phần ngân sách còn lại của tầng ngoài" />
+
+### Giám sát và tự đo
+
+Ba tín hiệu bắt buộc là số connection đang hoạt động, số thread chờ lấy connection và phân vị thời gian chờ.
+Khi thread chờ tăng mà connection hoạt động chưa chạm trần, vấn đề thường nằm ở rò rỉ hoặc transaction giữ connection quá lâu.
+Mọi thay đổi kích thước pool phải kèm đo độ trễ đầu-cuối trước và sau trên cùng kịch bản tải.
+
+Quy trình chỉnh pool an toàn cho production gồm năm bước có thứ tự.
+
+- Ghi lại số đo nền: độ trễ đầu-cuối, thời gian chờ connection, mức dùng CPU của database.
+- Nêu giả thuyết cụ thể, ví dụ pool của `report` đang tranh chấp với các truy vấn dài bất thường.
+- Chỉ thay đổi một tham số tại một thời điểm để còn biết thay đổi nào gây ra hiệu ứng.
+- Quan sát qua ít nhất một chu kỳ cao điểm đầy đủ trước khi kết luận.
+- Ghi lại quyết định và số đo vào tài liệu vận hành để người trực sau không chỉnh ngược lại theo cảm tính.
+
+Một lỗi vận hành hay gặp là chỉnh pool trong lúc sự cố mà không ghi lại giá trị cũ.
+Khi sự cố qua đi, không ai biết cấu hình nào đã cứu hệ thống và đâu là thay đổi cần giữ lại.
+Mọi thay đổi cấu hình pool trên production phải đi qua cùng kỷ luật như thay đổi code.
+Pool cũng cần được xem lại sau mỗi thay đổi lớn về tải: thêm đối tác, mở chiến dịch điểm thưởng, hay gộp thêm service dùng chung database.
+Con số đúng của quý này có thể là con số sai của quý sau nếu đặc tính tải đã đổi.
+
+Ghi nhớ nhanh: pool là ngân sách dùng chung, không phải van tăng tốc.
+Ai giữ connection lâu đều đang tiêu ngân sách của mọi request khác trong cùng datasource.
+
+## Code
+
+Cấu hình pool nằm trong `application.yml` cho từng datasource. Dependencies trong `pom.xml`: `spring-boot-starter-data-jpa` đã kéo theo HikariCP mặc định của Spring Boot 3.3.
+
+```yaml filename=application.yml
+spring:
+  datasource:
+    core:
+      hikari:
+        maximum-pool-size: 12
+        minimum-idle: 4
+        connection-timeout: 3000
+        max-lifetime: 1500000
+        pool-name: nova-core-pool
+    report:
+      hikari:
+        maximum-pool-size: 6
+        minimum-idle: 2
+        connection-timeout: 5000
+        pool-name: nova-report-pool
+```
+
+```java filename=PoolHealthIndicator.java
+package com.nova.loyalty.perf;
+
+import com.zaxxer.hikari.HikariDataSource;
+import com.zaxxer.hikari.HikariPoolMXBean;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.stereotype.Component;
+
+@Component
+public class PoolHealthIndicator {
+
+    private final HikariDataSource coreDataSource;
+
+    public PoolHealthIndicator(@Qualifier("coreDataSource") HikariDataSource coreDataSource) {
+        this.coreDataSource = coreDataSource;
+    }
+
+    public Map<String, Integer> snapshot() {
+        HikariPoolMXBean mxBean = coreDataSource.getHikariPoolMXBean();
+        Map<String, Integer> result = new LinkedHashMap<>();
+        result.put("activeConnections", mxBean.getActiveConnections());
+        result.put("idleConnections", mxBean.getIdleConnections());
+        result.put("totalConnections", mxBean.getTotalConnections());
+        result.put("threadsAwaitingConnection", mxBean.getThreadsAwaitingConnection());
+        return result;
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Tăng pool thật lớn mỗi khi thấy thread chờ connection
+
+- **Triệu chứng:** Database bão hòa CPU, mọi truy vấn chậm đồng đều và độ trễ đầu-cuối còn tệ hơn trước.
+- **Nguyên nhân:** Hàng chờ được chuyển từ pool sang database; nguyên nhân gốc là truy vấn chậm hoặc transaction dài giữ connection.
+- **Fix:** Đo thời gian giữ connection và độ trễ truy vấn trước; chỉ tăng pool khi database còn dư năng lực và có số đo chứng minh.
+
+### 2. Timeout tầng trong dài hơn timeout của gateway
+
+- **Triệu chứng:** Request đã bị gateway hủy nhưng backend vẫn chạy tiếp, giữ connection và ghi dữ liệu ngoài dự kiến.
+- **Nguyên nhân:** Ngân sách timeout không được lập nối tiếp, mỗi tầng tự đặt con số theo cảm tính.
+- **Fix:** Lập ngân sách timeout từ ngoài vào trong, tổng các tầng trong cộng phần đệm phải nhỏ hơn timeout tầng ngoài.
+
+### 3. Dùng chung một cấu hình pool cho cả 5 datasource
+
+- **Triệu chứng:** Báo cáo nặng làm đói pool dùng chung về mặt cấu hình dù datasource khác nhau, hoặc hệ legacy bị dồn dập quá mức.
+- **Nguyên nhân:** Đặc tính tải của core, report, legacy, gift và audit rất khác nhau nhưng bị áp một khuôn mẫu duy nhất.
+- **Fix:** Cấu hình riêng từng pool theo đặc tính tải, đặt tên pool rõ ràng để metric và log phân biệt được nguồn gốc.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Tính toán:** Áp dụng công thức heuristic cho một database có thông số CPU cho trước, nêu rõ vì sao kết quả chỉ là điểm khởi đầu và bạn sẽ đo thêm gì.
+2. **Ngân sách:** Lập bảng ngân sách timeout cho một request đổi quà chạm gateway, API, pool `gift`, pool `core` và hệ legacy; đảm bảo tổng tầng trong nhỏ hơn tầng ngoài.
+3. **Chẩn đoán:** Viết kịch bản phân biệt ba tình huống: pool thật sự thiếu, truy vấn chậm giữ connection, rò rỉ connection không trả về pool.
+4. **Cấu hình:** Soạn cấu hình pool cho datasource `audit` theo đặc tính ghi append-only và giải thích từng tham số đã chọn.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Boot — Data Access và HikariCP mặc định: https://docs.spring.io/spring-boot/reference/data/sql.html
+- Spring Framework — Transaction Management: https://docs.spring.io/spring-framework/reference/data-access/transaction.html
+- Dev.java — JDBC và truy cập dữ liệu: https://dev.java/learn/
+
+## Đọc thêm
+
+Không có.

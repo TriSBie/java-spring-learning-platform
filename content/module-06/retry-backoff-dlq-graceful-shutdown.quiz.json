@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Phân loại được lỗi tạm thời, lỗi vĩnh viễn và lỗi không rõ ràng trước khi đặt retry.",
+    "Thiết kế được exponential backoff kèm jitter, trần chờ và ngân sách tổng.",
+    "Cấu hình được DefaultErrorHandler với DeadLetterPublishingRecoverer cho Spring Kafka.",
+    "Nêu được quy trình vận hành DLQ gồm theo dõi, chẩn đoán, sửa nguyên nhân và replay.",
+    "Mô tả được các bước graceful shutdown trong ngân sách draining 75 giây.",
+    "Đối chiếu được timeout-per-shutdown-phase trong ứng dụng với terminationGracePeriodSeconds của pod."
+  ],
+  "quiz": [
+    {
+      "answerIndex": 2,
+      "explanation": "Lỗi tạm thời như chớp mạng hay quá tải ngắn hạn đáng retry; lỗi vĩnh viễn như payload hỏng retry bao nhiêu cũng cho cùng kết quả.",
+      "options": [
+        "Chỉ lỗi do người dùng gây ra mới đáng retry",
+        "Mọi lỗi đều đáng retry như nhau",
+        "Chỉ lỗi tạm thời mới đáng retry; lỗi vĩnh viễn phải tới xử lý cuối cùng như DLQ",
+        "Retry hay không phụ thuộc vào kích thước message"
+      ],
+      "question": "Loại lỗi nào đáng retry?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Jitter là ngẫu nhiên cộng thêm vào thời gian chờ để các client không đồng loạt thử lại cùng một nhịp sau sự cố chung.",
+      "options": [
+        "Thành phần ngẫu nhiên trong thời gian chờ để tránh thundering herd khi nhiều client retry đồng loạt",
+        "Một loại nén dữ liệu",
+        "Tên của một loại exception trong Kafka",
+        "Thuật toán chọn partition"
+      ],
+      "question": "Jitter trong backoff để làm gì?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Backoff hàm mũ làm khoảng chờ tăng dần và phải có trần, nếu không lần chờ cuối có thể dài vô lý.",
+      "options": [
+        "Sai, backoff luôn là chờ cố định",
+        "Đúng một nửa, chỉ áp dụng cho HTTP client",
+        "Sai, jitter thay thế hoàn toàn cho backoff",
+        "Đúng, khoảng chờ tăng theo cấp số nhân và cần trần tối đa cùng ngân sách tổng"
+      ],
+      "question": "Nhận định về exponential backoff có đúng không?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "DLQ/DLT giữ message hỏng kèm metadata để vận hành: chẩn đoán, sửa nguyên nhân và replay khi sẵn sàng.",
+      "options": [
+        "Hàng đợi/topic chứa message đã hết retry hoặc lỗi vĩnh viễn, kèm metadata lỗi để chẩn đoán và replay sau",
+        "Cơ chế tăng tốc độ consumer",
+        "Nơi xóa vĩnh viễn message hỏng",
+        "Một partition dự phòng của topic chính"
+      ],
+      "question": "Dead Letter Queue trong hệ thống Kafka của Nova là gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Không có DLQ, poison message sẽ được thử lại hoặc chặn đứng, khiến các message hợp lệ phía sau nó trong cùng partition không tiến lên được.",
+      "options": [
+        "Kafka tự sửa được payload hỏng",
+        "Nó chặn tiến trình của partition, các message sau nó không được xử lý hoặc hệ thống quay vòng lỗi mãi",
+        "Consumer tự tách nó sang một luồng riêng",
+        "Message đó tự biến mất sau một ngày"
+      ],
+      "question": "Điều gì xảy ra với một poison message khi không có DLQ?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Metadata như topic/partition/offset gốc, loại exception và dấu vết lỗi giúp định vị và replay đúng message sau khi sửa nguyên nhân.",
+      "options": [
+        "Chỉ nội dung message gốc là đủ",
+        "Thông tin định vị và chẩn đoán như topic, partition, offset gốc và loại exception đã xảy ra",
+        "Không cần thông tin gì thêm",
+        "Tên của developer viết consumer"
+      ],
+      "question": "Message vào DLQ cần mang theo thông tin gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Graceful shutdown là ngừng nhận việc mới nhưng hoàn tất việc đang dở trong grace period rồi mới đóng tài nguyên và thoát.",
+      "options": [
+        "Chỉ áp dụng cho web server, không liên quan Kafka listener",
+        "Đúng, ngừng nhận việc mới, xử lý xong việc đang dở trong giới hạn rồi mới đóng và thoát",
+        "Graceful shutdown do Kubernetes tự làm hết, ứng dụng không cần cấu hình",
+        "Sai, graceful nghĩa là giết tiến trình thật nhanh"
+      ],
+      "question": "Nhận định về graceful shutdown có đúng không?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Ngân sách trong ứng dụng phải nằm gọn trong grace period của pod (ở Nova là 75 giây cho consumer), nếu không SIGKILL cắt ngang giữa chừng.",
+      "options": [
+        "Tổng ngân sách drain của ứng dụng cộng trừ hao phải nằm gọn trong terminationGracePeriodSeconds của pod",
+        "Grace period của pod phải ngắn hơn shutdown của ứng dụng",
+        "Chúng không liên quan tới nhau",
+        "Chỉ cần cấu hình đúng một trong hai phía"
+      ],
+      "question": "Quan hệ giữa ngân sách shutdown của ứng dụng và grace period của pod là gì?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Retry một thao tác không rõ kết quả mà thao tác không idempotent có thể nhân đôi tác dụng, ví dụ cộng điểm hai lần.",
+      "options": [
+        "Chỉ cần tăng số lần retry là đủ",
+        "Lỗi không rõ ràng tự chuyển thành lỗi vĩnh viễn",
+        "Chỉ retry an toàn khi thao tác là idempotent, vì phía nhận có thể đã xử lý xong trước khi response bị mất",
+        "Retry luôn an toàn trong mọi trường hợp"
+      ],
+      "question": "Vì sao lỗi không rõ kết quả là nhóm nguy hiểm nhất khi retry?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Ngân sách tổng ngăn việc các lớp retry lồng nhau nhân thời gian chờ vượt quá timeout của tầng gọi ngoài cùng.",
+      "options": [
+        "Vì framework bắt buộc khai báo bốn con số",
+        "Để log có thêm một con số đẹp",
+        "Để DLQ nhận message nhanh hơn",
+        "Để tổng thời gian của mọi lớp retry lồng nhau vẫn nhỏ hơn timeout của tầng gọi ngoài cùng"
+      ],
+      "question": "Vì sao chính sách retry cần ngân sách thời gian tổng?"
+    }
+  ]
+}

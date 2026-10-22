@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Phát hành được sự kiện domain từ service mà không phụ thuộc vào listener cụ thể.",
+    "Chọn đúng pha transaction cho listener phụ thuộc dữ liệu đã commit.",
+    "Giải thích được hành vi đồng bộ mặc định và hệ quả lỗi của listener.",
+    "Phân biệt được sự kiện trong tiến trình với Outbox và Kafka về độ bền vững.",
+    "Thiết kế được chính sách lỗi riêng cho từng listener theo mức quan trọng.",
+    "Áp dụng được pattern cho audit event trên datasource audit của Nova Loyalty."
+  ],
+  "quiz": [
+    {
+      "question": "Listener theo pha sau commit đảm bảo điều gì?",
+      "options": [
+        "Sự kiện luôn được gửi sang Kafka",
+        "Listener chỉ chạy khi transaction của publisher đã commit thành công",
+        "Listener chạy trước mọi listener khác",
+        "Transaction không bao giờ rollback"
+      ],
+      "answerIndex": 1,
+      "explanation": "Pha sau commit gắn vòng đời listener với kết quả thật của transaction, tránh ghi audit cho giao dịch đã rollback."
+    },
+    {
+      "question": "Mặc định, listener sự kiện ứng dụng chạy thế nào?",
+      "options": [
+        "Luôn bất đồng bộ trên thread riêng",
+        "Qua Kafka topic nội bộ",
+        "Đồng bộ trên cùng thread với publisher",
+        "Chỉ chạy khi khởi động ứng dụng"
+      ],
+      "answerIndex": 2,
+      "explanation": "Mặc định là đồng bộ: publisher chờ listener xong và exception của listener lan ngược lên luồng chính."
+    },
+    {
+      "question": "Sự kiện ứng dụng khác Outbox qua Kafka ở điểm cốt lõi nào?",
+      "options": [
+        "Sự kiện ứng dụng sống trong bộ nhớ tiến trình và không bền vững qua crash, Outbox bền vững nhờ ghi cùng transaction vào database",
+        "Sự kiện ứng dụng dùng Java, Kafka dùng JSON",
+        "Kafka không hỗ trợ nhiều listener",
+        "Không khác nhau"
+      ],
+      "answerIndex": 0,
+      "explanation": "Độ bền vững là khác biệt quyết định: tích hợp liên service cần Outbox, việc phụ nội bộ mới nên dùng sự kiện trong tiến trình."
+    },
+    {
+      "question": "Publisher nên biết những gì về listener?",
+      "options": [
+        "Tên class của mọi listener",
+        "Thứ tự chạy của listener",
+        "Chính sách retry của từng listener",
+        "Không cần biết listener nào tồn tại, chỉ phát hành sự kiện mô tả điều đã xảy ra"
+      ],
+      "answerIndex": 3,
+      "explanation": "Tách publisher khỏi listener là bản chất của Observer: thêm việc phụ mới không đòi hỏi sửa publisher."
+    },
+    {
+      "question": "Sự kiện nên được thiết kế dạng nào?",
+      "options": [
+        "Object mutable để listener sửa dần",
+        "Dữ liệu bất biến mô tả sự thật đã xảy ra, đủ thông tin để listener tự xử lý",
+        "Chỉ chứa id và bắt listener truy vấn lại mọi thứ trong mọi trường hợp",
+        "Chứa tham chiếu tới entity đang gắn với session"
+      ],
+      "answerIndex": 1,
+      "explanation": "Sự kiện bất biến mang đủ dữ kiện giúp listener độc lập, tránh lỗi do trạng thái thay đổi sau khi phát hành."
+    },
+    {
+      "question": "Khi nào listener nên chạy bất đồng bộ?",
+      "options": [
+        "Luôn luôn, cho mọi listener",
+        "Khi listener ghi audit bắt buộc",
+        "Khi cần thứ tự tuyệt đối giữa các listener",
+        "Khi việc phụ chậm, không quan trọng tức thời và lỗi của nó không được chặn nghiệp vụ chính"
+      ],
+      "answerIndex": 3,
+      "explanation": "Bất đồng bộ đổi lấy độ trễ và độ phức tạp giám sát; chỉ nên dùng cho việc phụ không nằm trên đường tới hạn."
+    },
+    {
+      "question": "Rủi ro dễ gặp nhất khi hệ thống có nhiều listener cho cùng sự kiện là gì?",
+      "options": [
+        "Không thể có quá một listener",
+        "Sự kiện bị nhân bản thành message Kafka",
+        "Luồng thực thi trở nên ẩn, khó lần vết toàn bộ việc xảy ra sau một hành động",
+        "Publisher tự động bị xóa"
+      ],
+      "answerIndex": 2,
+      "explanation": "Tính ẩn là trade-off của decoupling: cần log, đặt tên sự kiện rõ và tài liệu hóa danh sách listener quan trọng."
+    },
+    {
+      "question": "Nếu không có transaction đang hoạt động, listener theo pha sau commit mặc định sẽ thế nào?",
+      "options": [
+        "Không chạy, trừ khi cấu hình cho phép chạy khi không có transaction",
+        "Chạy ngay lập tức",
+        "Ném lỗi biên dịch",
+        "Tự tạo transaction mới và chạy"
+      ],
+      "answerIndex": 0,
+      "explanation": "Listener gắn pha transaction cần một transaction để bám vào; thiếu transaction thì sự kiện bị bỏ qua nếu không bật phương án dự phòng."
+    },
+    {
+      "question": "Audit tại Nova Loyalty nên dùng cơ chế nào?",
+      "options": [
+        "Listener thường cho nhanh",
+        "Ghi audit trước khi cộng điểm",
+        "Listener pha sau commit, ghi vào datasource audit",
+        "Chỉ ghi log file là đủ cho audit"
+      ],
+      "answerIndex": 2,
+      "explanation": "Audit phải phản ánh giao dịch đã thành sự thật: pha sau commit và datasource audit riêng là lựa chọn đúng."
+    },
+    {
+      "question": "Exception trong một listener đồng bộ không quan trọng nên được xử lý thế nào?",
+      "options": [
+        "Để lan lên và rollback nghiệp vụ chính",
+        "Listener tự bắt, ghi log và metric cảnh báo, không để hỏng nghiệp vụ chính",
+        "Tắt toàn bộ listener khác",
+        "Khởi động lại ứng dụng"
+      ],
+      "answerIndex": 1,
+      "explanation": "Chính sách lỗi phải tường minh theo mức quan trọng: việc phụ tự cách ly lỗi của mình và để lại tín hiệu giám sát."
+    }
+  ]
+}

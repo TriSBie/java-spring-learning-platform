@@ -1,0 +1,180 @@
+---
+title: "Bộ Nhớ JVM, G1 và ZGC: Chọn GC Đúng Bài Toán"
+module: 8
+level: "Senior"
+duration: 55
+order: 1
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Vẽ và giải thích được các vùng bộ nhớ chính của JVM: heap theo thế hệ, metaspace, stack, direct memory và native memory.
+- So sánh được G1 và ZGC theo tiêu chí pause, throughput, heap size và loại workload, chọn được GC cho từng service của Nova Loyalty kèm lý do.
+- Đọc được GC log cơ bản: nhận diện pause dài, chu kỳ thu gom bất thường và dấu hiệu heap không đủ, nêu rõ cần tự đo bằng workload thật thay vì tin số liệu chung.
+
+## Vì sao cần biết
+
+Các service Nova Loyalty chạy Java 21 trên container: API gateway route, CRM sync consumer với cửa sổ draining 75 giây, và các service điểm. Khi khách phàn nàn API chậm theo cơn, rất nhiều lần nguyên nhân không nằm ở code nghiệp vụ mà ở pause thu gom rác dừng toàn bộ thread ứng dụng. Hiểu bộ nhớ JVM và chọn đúng bộ thu gom là kỹ năng phân biệt Middle với Senior tại Nova: chọn sai GC hoặc để mặc định không suy nghĩ khiến hệ thống trả giá bằng độ trễ đuôi khó lường, và mọi con số hiệu năng đều phải tự đo trên workload thật bằng JFR hoặc async-profiler thay vì sao chép từ bài viết bên ngoài.
+
+## Nội dung chính
+
+### Các vùng bộ nhớ của JVM
+
+Heap là nơi sống của object do ứng dụng tạo ra.
+Heap được chia theo thế hệ vì đa số object chết trẻ: vùng trẻ thu gom thường xuyên và rẻ, vùng già chứa object sống lâu.
+Ngoài heap còn có metaspace chứa metadata của class, stack cho từng thread, bộ nhớ direct cho buffer NIO và native memory cho chính JVM.
+Một tiến trình Java có thể bị hệ điều hành kết thúc vì tổng các vùng này vượt giới hạn container dù heap vẫn còn trống.
+
+Stack depth và số lượng thread cũng ăn bộ nhớ thật.
+Virtual thread của Java 21 giảm mạnh chi phí này cho workload chờ I/O nhưng không thay đổi bản chất heap.
+Muốn chẩn đoán đúng phải nhìn tổng thể tiến trình, không chỉ một con số heap.
+
+### G1: lựa chọn cân bằng mặc định
+
+G1 chia heap thành nhiều region và thu gom có chọn lọc theo giá trị rác.
+Mục tiêu của G1 là cân bằng throughput và pause có thể dự đoán qua tham số pause mục tiêu.
+G1 phù hợp với đa số service nghiệp vụ có heap vừa và yêu cầu độ trễ ổn định.
+Tham số pause mục tiêu là gợi ý cho bộ thu gom, không phải cam kết cứng cho mọi chu kỳ.
+
+<Mermaid chart={`flowchart LR
+  Req[Request] --> App[Thread ứng dụng]
+  App --> Heap[Heap theo region]
+  Heap --> G1[G1 thu gom có chọn lọc]
+  G1 --> Pause[Pause ngắn có mục tiêu]
+  Heap --> ZGC[ZGC thu gom đồng thời]
+  ZGC --> Pause2[Pause rất ngắn, tốn CPU nền]`} label="Hai triết lý thu gom: G1 cân bằng, ZGC đánh đổi CPU nền lấy pause cực ngắn" />
+
+### ZGC: pause cực ngắn, giá là CPU nền
+
+ZGC thực hiện phần lớn công việc thu gom đồng thời với thread ứng dụng.
+Đổi lại, ZGC tiêu tốn thêm CPU và bộ nhớ nền cho các cấu trúc đồng thời của nó.
+ZGC phát huy giá trị khi heap lớn và yêu cầu pause ở mức cực thấp là yêu cầu thật.
+Với service nhỏ hoặc máy ít CPU, chi phí nền của ZGC có thể làm tổng thể tệ hơn G1.
+Phiên bản thế hệ của ZGC trong Java 21 là hướng nên đánh giá khi chọn ZGC cho production.
+
+### Đọc GC log và tự đo
+
+Bật GC log ra file riêng với định dạng thống nhất và thông tin thời gian, kích thước heap trước và sau thu gom.
+Đọc log theo chuỗi thời gian quanh cửa sổ sự cố thay vì nhìn một dòng đơn lẻ.
+Các tín hiệu cần chú ý gồm pause tăng dần, thu gom vùng già liên tục mà heap không hạ, và chu kỳ full collection bất thường.
+Mọi kết luận phải đối chiếu với tải thật: cùng một cấu hình cho kết quả khác nhau trên các môi trường khác nhau.
+
+Khi đọc GC log cho một sự cố thật, hãy làm việc theo trình tự cố định sau.
+
+- Khoanh vùng cửa sổ thời gian của sự cố từ dashboard và log ứng dụng trước.
+- Đánh dấu các chu kỳ thu gom bất thường trong đúng cửa sổ đó, không đọc lan man toàn bộ file.
+- Đối chiếu pause với biểu đồ độ trễ của API để kiểm chứng quan hệ nhân quả.
+- Kiểm tra đường chân heap sau thu gom để phân biệt rò rỉ với dao động theo tải.
+- Ghi lại giả thuyết, bằng chứng ủng hộ và bằng chứng phản bác trước khi đề xuất thay đổi.
+
+Một thói quen tốt là lưu trữ GC log cùng phiên bản triển khai gây ra nó.
+Sau vài sự cố, team sẽ có thư viện mẫu hành vi của chính hệ thống mình.
+Thư viện mẫu nội bộ này giá trị hơn bất kỳ bảng so sánh GC tổng quát nào trên internet.
+Nó biến việc chọn GC từ tranh luận cảm tính thành quyết định dựa trên lịch sử đo đạc.
+Đó cũng là cách Nova chuẩn bị cho các quyết định nâng cấp Java hoặc đổi phần cứng về sau.
+
+Ghi nhớ nhanh khi đứng trước một quyết định chọn GC.
+
+- Nêu rõ yêu cầu pause của service bằng ngôn ngữ trải nghiệm người dùng, không dùng tính từ chung chung.
+- Ghi lại heap size, số CPU được cấp và đặc tính phân bổ của workload hiện tại.
+- Chạy thử nghiệm có kiểm soát trên môi trường giống production nhất có thể.
+- So sánh cả độ trễ phân vị cao lẫn throughput, không chỉ một con số trung bình.
+- Chuẩn bị sẵn phương án quay lui là đổi tham số khởi động, không cần phát hành lại code.
+- Ghi quyết định kèm bằng chứng vào tài liệu kiến trúc của team.
+
+Đọc lại checklist của bài và tự chấm trung thực trước khi chuyển sang bài tiếp theo trong module.
+Mọi khoảng trống kiến thức lộ ra lúc này đều rẻ hơn rất nhiều so với khi nó lộ ra trong một sự cố production.
+
+## Code
+
+Cấu hình nằm ở tham số khởi động JVM và `Dockerfile`. Không có code nghiệp vụ nào cần đổi khi chọn GC, nhưng phải ghi lại quyết định kèm workload đã đo.
+
+```bash filename=jvm-gc-flags.sh
+# G1 voi pause muc tieu lam goi y, GC log ra file rieng
+java -XX:+UseG1GC -XX:MaxGCPauseMillis=200 \
+  -Xlog:gc*,gc+heap=debug:file=/var/log/app/gc.log:time,uptime,level,tags:filecount=5,filesize=20m \
+  -jar app.jar
+
+# ZGC the he tren Java 21 cho service can pause cuc ngan va heap lon
+java -XX:+UseZGC -XX:+ZGenerational \
+  -Xlog:gc*,gc+heap=debug:file=/var/log/app/gc.log:time,uptime,level,tags:filecount=5,filesize=20m \
+  -jar app.jar
+```
+
+```java filename=GcPressureDemo.java
+package com.nova.loyalty.perf;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class GcPressureDemo {
+
+    public static void main(String[] args) {
+        List<byte[]> survivors = new ArrayList<>();
+        for (int round = 0; round < 200; round++) {
+            List<byte[]> young = new ArrayList<>();
+            for (int i = 0; i < 1_000; i++) {
+                young.add(new byte[8_192]);
+            }
+            if (round % 20 == 0) {
+                survivors.add(new byte[1_024 * 1_024]);
+                System.out.println("round=" + round + " survivors=" + survivors.size());
+            }
+        }
+        System.out.println("done survivors=" + survivors.size());
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Đặt pause mục tiêu cực nhỏ cho G1 trên heap lớn
+
+- **Triệu chứng:** Throughput toàn hệ thống giảm, CPU dành cho thu gom tăng nhưng pause đuôi vẫn xuất hiện theo cơn.
+- **Nguyên nhân:** Ép mục tiêu ngoài khả năng của workload khiến bộ thu gom làm việc quá thường xuyên và vẫn không đạt cam kết tưởng tượng.
+- **Fix:** Đặt mục tiêu pause thực tế, đo bằng GC log và JFR trên tải thật, cân nhắc ZGC nếu yêu cầu pause thật sự ở mức cực thấp.
+
+### 2. Chỉ nhìn heap khi tiến trình bị kill
+
+- **Triệu chứng:** Container báo hết bộ nhớ trong khi biểu đồ heap vẫn còn trống khá nhiều.
+- **Nguyên nhân:** Direct buffer, metaspace, stack của nhiều thread và native memory cũng tính vào giới hạn container.
+- **Fix:** Giám sát tổng bộ nhớ tiến trình và từng vùng, đặt giới hạn cho direct memory khi dùng nhiều buffer.
+
+### 3. Sao chép cấu hình GC từ bài viết bên ngoài
+
+- **Triệu chứng:** Đổi GC xong hệ thống chậm hơn nhưng team không giải thích được vì sao.
+- **Nguyên nhân:** Cấu hình được sao chép không kèm workload, heap size và phần cứng tương ứng với hệ thống của mình.
+- **Fix:** Mọi thay đổi GC phải có giả thuyết, bộ số đo trước và sau trên cùng kịch bản tải, và phương án quay lui.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Vẽ sơ đồ:** Vẽ bản đồ bộ nhớ của tiến trình CRM consumer gồm heap, metaspace, stack, direct memory và ghi chú vùng nào tăng khi tải tăng.
+2. **Đọc log:** Cho một đoạn GC log mẫu tự tạo, chỉ ra chu kỳ thu gom bất thường và viết giả thuyết nguyên nhân kèm cách kiểm chứng.
+3. **Thí nghiệm:** Chạy chương trình demo với hai GC khác nhau trên cùng máy, ghi lại quan sát từ GC log mà không kết luận vượt quá dữ liệu đã đo.
+4. **Quyết định:** Viết bản ghi quyết định chọn GC cho API service và cho consumer của Nova Loyalty, mỗi quyết định kèm tiêu chí sẽ khiến bạn đổi ý.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- OpenJDK — JDK 21 Documentation và GC Tuning: https://openjdk.org/projects/jdk/21/
+- Dev.java — Java Performance và JVM: https://dev.java/learn/jvm/
+- Spring Boot — Reference Documentation: https://docs.spring.io/spring-boot/reference/
+
+## Đọc thêm
+
+Không có.

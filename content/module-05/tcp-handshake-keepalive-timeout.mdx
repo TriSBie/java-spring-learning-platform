@@ -1,0 +1,186 @@
+---
+title: "TCP handshake, keep-alive và các lớp timeout"
+module: 5
+level: "Junior"
+duration: 40
+order: 1
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Mô tả được bắt tay ba bước của TCP, trạng thái `TIME_WAIT` và lý do nó tồn tại.
+- Giải thích được keep-alive ở tầng TCP và tầng HTTP, và lợi ích của việc tái sử dụng kết nối khi gọi giữa các service.
+- Phân biệt và cấu hình được connect timeout, read timeout và toàn bộ ngân sách thời gian cho một lời gọi HTTP bằng `RestClient`.
+
+## Vì sao cần biết
+
+Các service của Nova Loyalty gọi nhau liên tục: service điểm gọi service quà, gọi CRM, gọi dịch vụ định danh. Mỗi lời gọi là một kết nối TCP phía dưới HTTP. Khi hệ thống chậm vào giờ cao điểm đổi điểm, nguyên nhân thường không nằm ở logic nghiệp vụ mà ở tầng kết nối: mở kết nối mới cho mọi request làm cạn cổng tạm (ephemeral port), `TIME_WAIT` chất đống, hoặc một timeout đặt sai khiến thread bị giữ hàng chục giây và kéo sập cả pool. Hiểu TCP và timeout là kỹ năng gỡ lỗi nền tảng cho mọi backend dev, không riêng gì Nova.
+
+## Nội dung chính
+
+### Bắt tay ba bước và đóng kết nối
+
+TCP thiết lập kết nối bằng ba bước: client gửi `SYN`, server trả `SYN-ACK`, client gửi `ACK`. Chỉ sau bước này dữ liệu mới chảy. Đóng kết nối cũng cần một quá trình bắt tay riêng, và phía chủ động đóng sẽ giữ trạng thái `TIME_WAIT` trong một khoảng thời gian trước khi cổng được dùng lại hoàn toàn.
+
+`TIME_WAIT` không phải lỗi; nó bảo vệ hệ thống khỏi các gói tin lạc của kết nối cũ và đảm bảo phía còn lại nhận đủ tín hiệu đóng. Vấn đề chỉ xuất hiện khi số lượng kết nối ngắn hạn quá lớn, làm cạn ephemeral port và khiến kết nối mới không mở được.
+
+### Keep-alive: tái sử dụng kết nối
+
+Mở một kết nối TCP tốn ít nhất một vòng đi về (round trip) cho bắt tay, cộng thêm bắt tay TLS nếu có. Keep-alive cho phép dùng lại kết nối đã mở cho nhiều request:
+
+- Ở tầng TCP, keep-alive probe kiểm tra kết nối còn sống khi nó nhàn rỗi lâu.
+- Ở tầng HTTP, connection pool của HTTP client giữ kết nối để tái sử dụng; HTTP/1.1 mặc định giữ kết nối mở, HTTP/2 còn gộp nhiều stream trên một kết nối (xem bài tiếp theo).
+
+Với các service gọi nhau tần suất cao như ở Nova, tắt hoặc cấu hình pool quá nhỏ đồng nghĩa với việc trả chi phí bắt tay cho mọi request và tự tạo áp lực `TIME_WAIT` cho chính mình.
+
+<Mermaid chart={`sequenceDiagram
+  autonumber
+  Client->>Server: SYN
+  Server-->>Client: SYN-ACK
+  Client->>Server: ACK
+  Client->>Server: HTTP request 1
+  Server-->>Client: HTTP response 1
+  Client->>Server: HTTP request 2 tren cung ket noi
+  Server-->>Client: HTTP response 2
+  Note over Client,Server: Keep-alive tranh bat tay lai cho request 2
+`} label="Bắt tay ba bước chỉ xảy ra một lần khi kết nối được tái sử dụng nhờ keep-alive và connection pool." />
+
+### Ba lớp timeout phải phân biệt
+
+Khi một lời gọi HTTP bị treo, câu hỏi đúng là nó treo ở lớp nào:
+
+- Connect timeout: thời gian tối đa để thiết lập kết nối TCP (gồm cả bắt tay). Treo ở đây thường là mạng, firewall hoặc phía nhận không nghe.
+- Read timeout (socket timeout): thời gian tối đa chờ dữ liệu trả về sau khi kết nối đã mở và request đã gửi. Treo ở đây thường là phía nhận xử lý chậm hoặc chết giữa chừng.
+- Ngân sách tổng: tổng thời gian một nghiệp vụ sẵn sàng chờ, gồm cả DNS, connect, TLS, read và retry. Ngân sách này phải nhỏ hơn timeout của tầng gọi phía trên, nếu không sẽ xảy ra retry chồng retry.
+
+Một lỗi kinh điển là chỉ đặt read timeout rất dài mà không có connect timeout hợp lý, hoặc đặt timeout ở client dài hơn timeout ở gateway, khiến gateway đã trả lỗi cho khách nhưng service phía sau vẫn tiếp tục làm việc vô ích.
+
+### DNS và TLS cũng nằm trong ngân sách
+
+Trước connect còn có phân giải DNS và sau connect còn có bắt tay TLS. Cả hai đều tốn thời gian và đều có thể treo. Khi đo độ trễ, hãy tách các pha này thay vì chỉ nhìn một con số tổng, nếu không bạn sẽ tối ưu sai chỗ.
+
+### Quan sát kết nối trong thực tế
+
+Khi nghi ngờ sự cố nằm ở tầng kết nối, các dấu hiệu cần kiểm tra gồm:
+
+- Số lượng kết nối đang mở và số lượng ở trạng thái `TIME_WAIT`, xem chúng tăng theo lưu lượng hay tăng không ngừng.
+- Tỷ lệ lỗi theo pha: lỗi khi phân giải tên, lỗi khi kết nối, hay lỗi khi đã gửi request mà không nhận được response.
+- Độ trễ phân vị cao (p95, p99) của từng pha, vì sự cố timeout thường lộ ở đuôi phân phối chứ không ở giá trị trung bình.
+- Mối tương quan giữa thời điểm deploy, thời điểm thay đổi cấu hình pool/timeout và thời điểm triệu chứng bắt đầu.
+
+Ghi lại các dấu hiệu này trước khi thay đổi cấu hình giúp bạn biết thay đổi của mình có thật sự chữa đúng bệnh hay chỉ làm triệu chứng dịch sang chỗ khác.
+
+## Code
+
+Cấu hình `RestClient` với factory có connect timeout và read timeout tách bạch. `RestClient` là HTTP client đồng bộ hiện đại của Spring Framework 6, nên dùng thay cho HTTP client đồng bộ cũ.
+
+```java filename=NovaHttpClientConfig.java
+package com.nova.loyalty.http;
+
+import java.time.Duration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
+import org.springframework.web.client.RestClient;
+import java.net.http.HttpClient;
+
+@Configuration
+public class NovaHttpClientConfig {
+
+    @Bean
+    public RestClient crmRestClient(RestClient.Builder builder) {
+        HttpClient httpClient = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(2))
+                .version(HttpClient.Version.HTTP_2)
+                .build();
+        JdkClientHttpRequestFactory factory = new JdkClientHttpRequestFactory(httpClient);
+        factory.setReadTimeout(Duration.ofSeconds(5));
+        return builder
+                .baseUrl("https://crm.internal.nova.example.com")
+                .requestFactory(factory)
+                .defaultHeader("Accept", "application/json")
+                .build();
+    }
+
+    @Bean
+    public RestClient giftRestClient(RestClient.Builder builder) {
+        HttpClient httpClient = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(2))
+                .build();
+        JdkClientHttpRequestFactory factory = new JdkClientHttpRequestFactory(httpClient);
+        factory.setReadTimeout(Duration.ofSeconds(3));
+        return builder
+                .baseUrl("https://gift.internal.nova.example.com")
+                .requestFactory(factory)
+                .build();
+    }
+}
+```
+
+Đọc cấu hình timeout từ `application.yml` để mỗi môi trường có ngân sách riêng mà không sửa code:
+
+```yaml filename=application.yml
+nova:
+  http:
+    crm:
+      connect-timeout: 2s
+      read-timeout: 5s
+    gift:
+      connect-timeout: 2s
+      read-timeout: 3s
+```
+
+Nguyên tắc khi chọn số: connect timeout tính bằng giây nhỏ, read timeout theo độ trễ xử lý thực tế của phía nhận cộng biên an toàn, và tổng ngân sách của một lời gọi phải nhỏ hơn timeout mà gateway áp cho request vào.
+
+## Sai lầm thường gặp
+
+### 1. Không đặt timeout nào cả
+
+- **Triệu chứng:** Khi một downstream chết lặng, thread xử lý bị giữ vô hạn, pool cạn dần và toàn bộ service tê liệt theo.
+- **Nguyên nhân:** Dùng cấu hình mặc định không timeout hoặc timeout vô hạn cho HTTP client.
+- **Fix:** Luôn đặt cả connect timeout và read timeout cho mọi HTTP client; coi việc thiếu timeout là lỗi cấu hình phải chặn ở review.
+
+### 2. Nhầm connect timeout với read timeout
+
+- **Triệu chứng:** Đội vận hành tăng read timeout để chữa lỗi không kết nối được, nhưng lỗi không đổi mà thread còn bị giữ lâu hơn.
+- **Nguyên nhân:** Không phân biệt pha thiết lập kết nối với pha chờ dữ liệu sau khi đã kết nối.
+- **Fix:** Đo và log riêng từng pha; lỗi ở pha connect thì kiểm tra mạng, DNS, firewall và cổng lắng nghe của phía nhận.
+
+### 3. Tắt keep-alive hoặc pool quá nhỏ cho traffic cao
+
+- **Triệu chứng:** Số lượng `TIME_WAIT` tăng vọt, thỉnh thoảng gặp lỗi không mở được kết nối dù server còn khỏe.
+- **Nguyên nhân:** Mỗi request mở một kết nối mới, làm cạn ephemeral port ở phía chủ động đóng kết nối.
+- **Fix:** Bật connection pooling với giới hạn phù hợp tải, tái sử dụng `RestClient` như một bean dùng chung thay vì tạo mới cho mỗi request.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được; trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay, không có chấm tự động.
+
+1. Vẽ lại bắt tay ba bước và quá trình đóng kết nối, đánh dấu phía nào giữ `TIME_WAIT` và giải thích vì sao trạng thái này cần tồn tại.
+2. Cho một kịch bản: gateway cho phép 10 giây, service A gọi service B. Đề xuất connect timeout, read timeout cho A gọi B và giải thích quan hệ giữa các con số.
+3. Mô tả cách bạn phân biệt một sự cố treo ở pha DNS, pha connect và pha read chỉ bằng log và công cụ đo độ trễ.
+4. Tính toán bằng lời: nếu mỗi request đều mở kết nối mới và hệ thống có lưu lượng cao điểm lớn, rủi ro ephemeral port sẽ xuất hiện ở thành phần nào trước và dấu hiệu nhận biết là gì?
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Framework — RestClient: https://docs.spring.io/spring-framework/reference/integration/rest-clients.html
+- Java Platform — HttpClient API: https://openjdk.org/groups/net/httpclient/intro.html
+- RFC 9293 — Transmission Control Protocol: https://datatracker.ietf.org/doc/html/rfc9293
+
+## Đọc thêm
+
+Không có.

@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Định nghĩa được interface strategy và tách mỗi quy tắc tính điểm thành một bean riêng.",
+    "Giải thích được vì sao key của map bean chính là tên bean và cách đặt tên tường minh.",
+    "Viết được service tra cứu strategy theo key và xử lý rõ ràng khi key không tồn tại.",
+    "Viết được unit test độc lập cho từng strategy mà không cần khởi động Spring context.",
+    "Nêu được ít nhất hai trade-off của Strategy so với chuỗi điều kiện đơn giản.",
+    "Áp dụng được pattern cho bài toán tính điểm theo 3 nguồn ví của Nova Loyalty."
+  ],
+  "quiz": [
+    {
+      "question": "Key của map khi tiêm `Map<String, PointsCalculator>` vào constructor là gì?",
+      "options": [
+        "Tên class viết hoa toàn bộ",
+        "Tên bean của từng implementation",
+        "Thứ tự khai báo trong file cấu hình",
+        "Tên package của implementation"
+      ],
+      "answerIndex": 1,
+      "explanation": "Spring gom mọi bean cùng type vào map, key chính là tên bean. Vì vậy đặt tên bean tường minh giúp key khớp với mã loại giao dịch."
+    },
+    {
+      "question": "Lợi ích chính của Strategy qua bean map so với chuỗi if/else là gì?",
+      "options": [
+        "Chạy nhanh hơn hẳn trong mọi trường hợp",
+        "Không cần viết test nữa",
+        "Thêm loại mới bằng cách thêm class mới, không sửa logic chọn và tính của loại cũ",
+        "Tự động lưu database"
+      ],
+      "answerIndex": 2,
+      "explanation": "Mỗi quy tắc nằm trong class riêng, service chỉ tra cứu theo key. Thêm loại giao dịch là thêm bean mới, giảm rủi ro regression."
+    },
+    {
+      "question": "Khi key giao dịch không có trong map, hành vi đúng nhất là gì?",
+      "options": [
+        "Ném exception nghiệp vụ rõ ràng kèm thông tin loại giao dịch",
+        "Trả về 0 điểm và tiếp tục",
+        "Chọn strategy đầu tiên trong map",
+        "Bỏ qua giao dịch và commit bình thường"
+      ],
+      "answerIndex": 0,
+      "explanation": "Fallback im lặng làm mất điểm của khách mà không ai biết. Ném lỗi rõ ràng giúp phát hiện sớm cấu hình hoặc dữ liệu thiếu."
+    },
+    {
+      "question": "Annotation nào đặt tên bean tường minh cho một strategy?",
+      "options": [
+        "Chỉ annotation trên interface",
+        "Không có cách nào, phải dùng XML",
+        "Annotation trên method main",
+        "Annotation trên component kèm giá trị tên trong ngoặc"
+      ],
+      "answerIndex": 3,
+      "explanation": "Đặt tên trong annotation của component giúp key của map ổn định, không phụ thuộc quy ước suy từ tên class."
+    },
+    {
+      "question": "Strategy nên có đặc tính nào để dễ test nhất?",
+      "options": [
+        "Phụ thuộc vào nhiều service khác",
+        "Thuần túy: nhận input, trả output, ít phụ thuộc bên ngoài",
+        "Giữ state dùng chung giữa các request",
+        "Tự mở transaction database riêng"
+      ],
+      "answerIndex": 1,
+      "explanation": "Strategy thuần túy dễ viết unit test độc lập, không cần Spring context hay database."
+    },
+    {
+      "question": "Khi nào KHÔNG nên dùng Strategy qua bean map?",
+      "options": [
+        "Khi có 5 loại giao dịch thay đổi độc lập",
+        "Khi cần test từng quy tắc riêng",
+        "Khi nhiều team cùng phát triển các loại khác nhau",
+        "Khi chỉ có 2 nhánh ổn định, hiếm khi thay đổi"
+      ],
+      "answerIndex": 3,
+      "explanation": "Với ít nhánh ổn định, pattern này tạo thêm class và độ gián tiếp không cần thiết. Đơn giản là một giá trị thiết kế."
+    },
+    {
+      "question": "Muốn thêm loại giao dịch PARTNER mới, cần làm tối thiểu những gì?",
+      "options": [
+        "Sửa service, sửa mọi strategy cũ",
+        "Đổi interface của mọi strategy",
+        "Chỉ thêm một implementation mới với tên bean PARTNER",
+        "Khởi động lại database"
+      ],
+      "answerIndex": 2,
+      "explanation": "Nhờ cơ chế gom bean tự động, chỉ cần thêm implementation mới đúng tên bean, service tự tra cứu được."
+    },
+    {
+      "question": "Vì sao nên sao chép map được tiêm vào thành bản sao bất biến trong constructor?",
+      "options": [
+        "Để tránh code khác sửa map sau khi service đã khởi tạo",
+        "Để map tự sắp xếp theo key",
+        "Để Spring tạo bean nhanh hơn",
+        "Vì map gốc không dùng được sau constructor"
+      ],
+      "answerIndex": 0,
+      "explanation": "Sao chép bất biến bảo vệ invariant của service: tập strategy cố định sau khởi tạo, tránh sửa đổi ngoài ý muốn."
+    },
+    {
+      "question": "Test nào kiểm chứng tốt nhất việc chọn đúng strategy?",
+      "options": [
+        "Test khởi động toàn bộ ứng dụng",
+        "Test chỉ kiểm tra bean tồn tại",
+        "Test service với map chứa các strategy giả lập khác nhau theo key",
+        "Không cần test lớp chọn strategy"
+      ],
+      "answerIndex": 2,
+      "explanation": "Dùng stub strategy cho từng key giúp kiểm chứng logic tra cứu và nhánh lỗi mà không phụ thuộc công thức thật."
+    },
+    {
+      "question": "Trade-off dễ thấy nhất của pattern này là gì?",
+      "options": [
+        "Mất khả năng dùng Spring DI",
+        "Luồng thực thi gián tiếp hơn, phải tra cứu map mới biết code nào chạy",
+        "Không thể viết bằng Java 21",
+        "Bắt buộc dùng database riêng cho mỗi strategy"
+      ],
+      "answerIndex": 1,
+      "explanation": "Độ gián tiếp là giá phải trả cho khả năng mở rộng: người đọc phải biết key mới lần ra được implementation thực thi."
+    }
+  ]
+}

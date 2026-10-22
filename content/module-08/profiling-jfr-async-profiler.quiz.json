@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Khởi tạo, kiểm tra và dừng được một bản ghi JFR trên tiến trình đang chạy.",
+    "Đọc đúng flame graph theo tỉ lệ mẫu và độ sâu stack.",
+    "Phân biệt được khi cần JFR với khi cần mẫu CPU hoặc mẫu phân bổ bộ nhớ.",
+    "Trình bày được quy trình điều tra endpoint chậm dựa trên bằng chứng.",
+    "Nêu được các lỗi đọc số liệu profiling kinh điển và cách tránh.",
+    "Xác minh được hiệu quả của thay đổi hiệu năng bằng đo lại cùng kịch bản."
+  ],
+  "quiz": [
+    {
+      "question": "Trong flame graph, chiều ngang của một ô thể hiện điều gì?",
+      "options": [
+        "Thứ tự thời gian xuất hiện của method",
+        "Tỉ lệ số mẫu mà stack chứa method đó chiếm trong tổng số mẫu",
+        "Số dòng code của method",
+        "Độ ưu tiên của thread"
+      ],
+      "answerIndex": 1,
+      "explanation": "Ô càng rộng nghĩa là stack đó xuất hiện trong càng nhiều mẫu. Trục ngang không phải thời gian; muốn xem thời gian phải dùng dữ liệu sự kiện như JFR."
+    },
+    {
+      "question": "JFR mạnh nhất ở khả năng nào?",
+      "options": [
+        "Thay thế hoàn toàn hệ thống log",
+        "Tự động sửa điểm nóng",
+        "Ghi nhiều loại sự kiện của JVM trên cùng trục thời gian với chi phí thấp để tương quan khi điều tra",
+        "Đo độ trễ mạng giữa các service"
+      ],
+      "answerIndex": 2,
+      "explanation": "Giá trị của JFR là bức tranh đa sự kiện có tương quan thời gian: GC, khóa, phân bổ và mẫu thực thi nằm chung một bản ghi."
+    },
+    {
+      "question": "Bước đầu tiên đúng khi điều tra endpoint chậm theo cơn là gì?",
+      "options": [
+        "Khoanh vùng cửa sổ thời gian và phạm vi bị ảnh hưởng, liệt kê giả thuyết rồi mới thu thập bằng chứng",
+        "Sửa ngay method bị nghi ngờ nhất",
+        "Tăng tài nguyên cho mọi service",
+        "Khởi động lại toàn bộ hệ thống"
+      ],
+      "answerIndex": 0,
+      "explanation": "Điều tra hiệu quả bắt đầu bằng phạm vi và giả thuyết. Thu thập bừa bãi ngoài cửa sổ sự cố cho dữ liệu vô ích."
+    },
+    {
+      "question": "Một method rất rộng trong flame graph có luôn là thủ phạm không?",
+      "options": [
+        "Luôn luôn",
+        "Không bao giờ",
+        "Chỉ đúng khi method đó nằm ở lá của stack",
+        "Không: nó có thể là điểm tập hợp của nhiều đường gọi hợp lệ, cần đọc ngữ cảnh stack và bản chất công việc"
+      ],
+      "answerIndex": 3,
+      "explanation": "Phải phân biệt nơi thời gian cháy với nơi gây ra việc cháy. Đọc chuỗi stack và đối chiếu nghiệp vụ mới kết luận được."
+    },
+    {
+      "question": "Khi nghi ngờ áp lực phân bổ bộ nhớ gây thu gom rác thường xuyên, nên thu mẫu loại nào?",
+      "options": [
+        "Chỉ mẫu CPU",
+        "Mẫu phân bổ kết hợp sự kiện thu gom trong JFR",
+        "Chỉ log ứng dụng",
+        "Chỉ metric mạng"
+      ],
+      "answerIndex": 1,
+      "explanation": "Mẫu phân bổ chỉ ra nơi cấp phát nhiều; ghép với sự kiện GC trong cùng cửa sổ mới chứng minh được chuỗi nhân quả."
+    },
+    {
+      "question": "Vì sao phải giới hạn thời lượng và dung lượng của bản ghi JFR?",
+      "options": [
+        "Để file đẹp hơn",
+        "Vì JFR chỉ ghi được đúng một phút",
+        "Để ẩn dữ liệu khỏi đội vận hành",
+        "Để việc thu thập không tự gây sự cố đĩa hoặc kéo dài vô hạn trên production"
+      ],
+      "answerIndex": 3,
+      "explanation": "Công cụ chẩn đoán cũng tiêu tài nguyên. Kỷ luật giới hạn giúp profiling an toàn trên hệ thống đang có sự cố."
+    },
+    {
+      "question": "Sai lầm đọc flame graph kinh điển nhất là gì?",
+      "options": [
+        "Đọc ô rộng là nơi cháy nhiều thời gian",
+        "Đọc stack từ gốc tới lá",
+        "Đọc trục ngang như trục thời gian và kết luận thứ tự xảy ra của các method",
+        "Đối chiếu flame graph với JFR"
+      ],
+      "answerIndex": 2,
+      "explanation": "Thứ tự trái phải trong flame graph là do sắp xếp mẫu, không mang ý nghĩa thời gian. Nhầm lẫn này dẫn tới kết luận nhân quả sai."
+    },
+    {
+      "question": "Sau khi sửa điểm nóng, bước bắt buộc để kết luận là gì?",
+      "options": [
+        "Đo lại bằng cùng kịch bản và cùng cách thu thập để so sánh trước và sau",
+        "Đóng sự cố ngay",
+        "Xóa bản ghi cũ",
+        "Tăng gấp đôi tài nguyên"
+      ],
+      "answerIndex": 0,
+      "explanation": "Không có đo lại cùng điều kiện thì không có bằng chứng thay đổi thật sự hiệu quả; cảm giác nhanh hơn không phải dữ liệu."
+    },
+    {
+      "question": "Khi nào nên ưu tiên async-profiler hơn chỉ dùng JFR?",
+      "options": [
+        "Khi không có quyền truy cập tiến trình",
+        "Khi sự cố nằm ở database là chính",
+        "Khi cần mẫu stack gồm cả tầng native với chi phí rất thấp và flame graph trực quan",
+        "Không bao giờ, hai công cụ xung đột nhau"
+      ],
+      "answerIndex": 2,
+      "explanation": "Hai công cụ bổ sung nhau: async-profiler mạnh ở mẫu stack liên tục gồm native, JFR mạnh ở sự kiện JVM có trục thời gian."
+    },
+    {
+      "question": "Bản ghi vòng tròn hoặc thu thập kích hoạt theo cảnh báo giải quyết vấn đề gì?",
+      "options": [
+        "Làm flame graph đẹp hơn",
+        "Bắt đúng khoảnh khắc của sự cố theo cơn vốn biến mất trước khi con người kịp thu thập thủ công",
+        "Thay thế hệ thống cảnh báo",
+        "Giảm nhu cầu lưu trữ log"
+      ],
+      "answerIndex": 1,
+      "explanation": "Sự cố thoáng qua cần cơ chế bắt tại trận. Đây là lý do các hệ thống production giữ dữ liệu chẩn đoán dạng vòng đệm."
+    }
+  ]
+}

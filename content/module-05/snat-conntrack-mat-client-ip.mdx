@@ -1,0 +1,184 @@
+---
+title: "SNAT, conntrack và vì sao pod mất client IP thật"
+module: 5
+level: "Senior"
+duration: 55
+order: 4
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Kafka 3.8"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Giải thích được SNAT và bảng conntrack, và vì sao traffic qua load balancer phía trước cụm pod thường làm backend mất địa chỉ IP thật của client.
+- Thiết kế được chuỗi tin cậy `X-Forwarded-For` đúng: chỉ tin header từ các proxy nằm trong danh sách tin cậy, và cấu hình Spring Boot đọc nó bằng `server.forward-headers-strategy`.
+- Nêu được đánh đổi của `externalTrafficPolicy: Local` trong Kubernetes Service so với chính sách mặc định, và chọn đúng cho từng yêu cầu nghiệp vụ.
+
+## Vì sao cần biết
+
+Đây là một sự cố có thật trong câu chuyện của Nova Loyalty: các pod chạy phía sau load balancer, traffic vào bị SNAT khiến mọi request tới service đều mang địa chỉ nguồn là của load balancer hoặc của node, không còn là IP thật của khách hàng. Hệ quả dây chuyền rất thực tế: rate limiting theo IP trở nên vô nghĩa vì mọi khách dùng chung một "IP", log điều tra gian lận mất dấu vết, và các rule chặn theo vùng địa lý sai hoàn toàn. Fix không nằm ở một dòng code mà ở cả chuỗi: chính sách traffic của Service, cách proxy gắn header, và cách Spring Boot được phép tin header đó.
+
+## Nội dung chính
+
+### NAT, SNAT và conntrack
+
+NAT (Network Address Translation) viết lại địa chỉ khi gói tin đi qua một biên mạng. SNAT (Source NAT) viết lại địa chỉ nguồn. Khi load balancer hoặc node thực hiện SNAT cho traffic vào pod, pod chỉ nhìn thấy địa chỉ đã bị viết lại.
+
+Để gói trả lời đi đúng đường về, thiết bị NAT duy trì bảng conntrack (connection tracking): mỗi kết nối được ghi lại ánh xạ giữa địa chỉ gốc và địa chỉ đã dịch, kèm cổng, để gói quay về được dịch ngược. Conntrack là tài nguyên có giới hạn: ở tải rất cao, bảng đầy hoặc mục bị hết hạn sớm có thể gây rớt gói khó hiểu. Hiểu conntrack giúp bạn không nhầm các triệu chứng ở tầng này với lỗi ứng dụng.
+
+### Vì sao mất IP thật: hai đường đi phổ biến
+
+- Load balancer tầng 4 thực hiện SNAT: backend thấy IP của load balancer.
+- Service Kubernetes với chính sách mặc định (`externalTrafficPolicy: Cluster`): traffic có thể được chuyển tới pod ở node khác, và trên đường đó địa chỉ nguồn bị thay bằng IP của node để đảm bảo đường về đối xứng. Backend thấy IP của node.
+
+Trong cả hai trường hợp, thông tin IP gốc không còn ở tầng IP nữa. Cách khôi phục chuẩn là truyền nó ở tầng ứng dụng qua header, phổ biến nhất là `X-Forwarded-For`, hoặc giao thức PROXY protocol ở một số thiết lập L4 (nằm ngoài phạm vi chính của bài).
+
+### X-Forwarded-For và chuỗi tin cậy
+
+`X-Forwarded-For` là một danh sách: mỗi proxy trên đường đi nối thêm địa chỉ mà nó nhìn thấy. Phần tử đầu tiên là IP gốc theo tuyên bố của hop đầu tiên, các phần tử sau là các proxy trung gian.
+
+Điểm sống còn: header này do client gửi lên được và có thể giả mạo hoàn toàn. Service chỉ được tin nó khi request đến từ một proxy nằm trong danh sách tin cậy mà bạn kiểm soát, proxy đó phải ghi đè hoặc làm sạch giá trị do client gửi trước khi nối thêm giá trị của mình. Tin `X-Forwarded-For` từ mọi nguồn đồng nghĩa với việc cho phép bất kỳ ai tự khai IP của người khác, phá hỏng rate limiting và log bảo mật theo cách nguy hiểm hơn cả mất IP thật.
+
+<Mermaid chart={`flowchart LR
+  A[Client IP that] --> B[Load Balancer - SNAT]
+  B -->|IP nguon da bi doi thanh IP cua LB/node| C[Pod Nova Loyalty]
+  B -->|Gan X-Forwarded-For: IP that| C
+  C --> D{Request den tu proxy tin cay}
+  D -->|Dung| E[Doc IP that tu header de rate limit va ghi log]
+  D -->|Khong| F[Bo qua header, dung remote address]
+`} label="SNAT làm mất IP thật ở tầng IP; X-Forwarded-For chỉ khôi phục được khi chuỗi proxy tin cậy được thiết kế đúng." />
+
+### Cấu hình phía Spring Boot
+
+Spring Boot hỗ trợ đọc các header chuyển tiếp qua `server.forward-headers-strategy`:
+
+- Giá trị `framework` dùng cơ chế của Spring Framework để xử lý header chuyển tiếp và cập nhật `remoteAddress`, scheme, port cho request.
+- Giá trị `native` dựa vào chính servlet container.
+
+Dù chọn giá trị nào, nguyên tắc không đổi: tính năng này chỉ an toàn khi service nằm sau proxy tin cậy đã làm sạch header. Framework không thể tự biết proxy nào là của bạn. Một số môi trường còn cần khai báo rõ danh sách proxy nội bộ đáng tin ở tầng container hoặc gateway.
+
+> [!WARNING] Cần verify với docs version Spring Boot 3.3.x và Kubernetes đang dùng thực tế: hành vi mặc định của các Service type khác nhau (NodePort, LoadBalancer) với `externalTrafficPolicy` và chi tiết khóa cấu hình forward headers có thể khác giữa các bản và nhà cung cấp cloud.
+
+### externalTrafficPolicy: Local
+
+Đặt `externalTrafficPolicy: Local` cho Service kiểu NodePort/LoadBalancer sẽ giữ nguyên địa chỉ nguồn của client khi traffic được chuyển tới pod trên cùng node, vì không cần SNAT để đảm bảo đường về nữa. Đánh đổi:
+
+- Traffic chỉ vào được các node có pod của service; node không có pod sẽ không nhận traffic từ bên ngoài cho service đó.
+- Phân bổ tải có thể kém đều hơn nếu pod phân bố không đều giữa các node.
+- Health check của load balancer phải hiểu chính sách này để không gửi traffic vào node không có pod khỏe.
+
+Quyết định đúng phụ thuộc vào điều gì quan trọng hơn với từng service: giữ IP thật cho nghiệp vụ (chống gian lận, rate limit theo khách) hay độ đều tải và tính đơn giản vận hành.
+
+## Code
+
+Cấu hình Spring Boot đọc header chuyển tiếp và giới hạn việc tin header vào các tình huống sau proxy của Nova:
+
+```yaml filename=application.yml
+server:
+  forward-headers-strategy: framework
+  tomcat:
+    remoteip:
+      internal-proxies: "10\\.\\d+\\.\\d+\\.\\d+|172\\.1[6-9]\\.\\d+\\.\\d+|172\\.2\\d\\.\\d+\\.\\d+|172\\.3[0-1]\\.\\d+\\.\\d+|192\\.168\\.\\d+\\.\\d+"
+spring:
+  application:
+    name: nova-points-service
+```
+
+Service Kubernetes giữ IP thật cho các endpoint cần rate limit theo khách hàng:
+
+```yaml filename=nova-public-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: nova-points-public
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector:
+    app: nova-points
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+```
+
+Đọc IP hiệu dụng trong code nghiệp vụ qua `request.getRemoteAddr()` sau khi forward header đã được framework xử lý, thay vì tự parse header thô:
+
+```java filename=ClientIpResolver.java
+package com.nova.loyalty.web;
+
+import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.stereotype.Component;
+
+@Component
+public class ClientIpResolver {
+
+    public String resolve(HttpServletRequest request) {
+        String remote = request.getRemoteAddr();
+        if (remote == null || remote.isBlank()) {
+            return "unknown";
+        }
+        return remote;
+    }
+
+    public String rateLimitKey(HttpServletRequest request, String memberId) {
+        if (memberId != null && !memberId.isBlank()) {
+            return "member:" + memberId;
+        }
+        return "ip:" + resolve(request);
+    }
+}
+```
+
+Lưu ý trong ví dụ trên: rate limiting ưu tiên khóa theo `memberId` đã xác thực thay vì chỉ dựa vào IP, vì IP vẫn có thể dùng chung (NAT của nhà mạng, văn phòng) và vẫn có thể bị làm giả nếu chuỗi tin cậy bị cấu hình sai ở bất kỳ hop nào phía trước.
+
+## Sai lầm thường gặp
+
+### 1. Tin X-Forwarded-For từ mọi nguồn
+
+- **Triệu chứng:** Kẻ tấn công tự đặt header với IP của nạn nhân và vượt qua mọi rule chặn theo IP, log điều tra ghi sai thủ phạm.
+- **Nguyên nhân:** Service đọc thẳng header mà không kiểm tra request có thực sự đến từ proxy tin cậy hay không.
+- **Fix:** Chỉ xử lý header khi nguồn nằm trong danh sách proxy tin cậy, đảm bảo proxy biên ghi đè hoặc làm sạch giá trị client gửi lên.
+
+### 2. Kỳ vọng externalTrafficPolicy Local là miễn phí
+
+- **Triệu chứng:** Sau khi bật `Local`, tải phân bổ lệch hẳn và một số node bị quá tải dù tổng số pod không đổi.
+- **Nguyên nhân:** Chỉ các node có pod mới nhận traffic bên ngoài cho service, và mức phân bổ pod giữa các node không đều.
+- **Fix:** Đánh giá phân bổ pod trước khi bật, cân nhắc anti-affinity để rải pod đều giữa các node, và theo dõi tải theo node sau thay đổi.
+
+### 3. Tự parse X-Forwarded-For thủ công ở nhiều nơi
+
+- **Triệu chứng:** Mỗi service cho một IP khác nhau cho cùng một request; service lấy phần tử cuối, service lấy phần tử đầu, service không trim khoảng trắng.
+- **Nguyên nhân:** Không thống nhất một cơ chế đọc IP hiệu dụng duy nhất dựa trên xử lý forward header của framework.
+- **Fix:** Bật `server.forward-headers-strategy` và chỉ đọc qua `getRemoteAddr()` ở một component dùng chung; cấm parse header thô rải rác trong controller.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được; trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay, không có chấm tự động.
+
+1. Vẽ đường đi của một request vào Nova Loyalty trong hai thiết kế: `externalTrafficPolicy` mặc định và `Local`; ghi rõ ở từng hop địa chỉ nguồn mà pod nhìn thấy là gì.
+2. Viết chính sách tin cậy cho `X-Forwarded-For` của Nova: proxy nào được phép ghi header, giá trị client gửi lên được xử lý thế nào, và service kiểm tra điều kiện gì trước khi tin.
+3. Cho ba nhu cầu (rate limit theo khách, log chống gian lận, định tuyến theo vùng), đánh giá mức độ phụ thuộc vào IP thật và đề xuất khóa thay thế khi IP không đáng tin.
+4. Mô tả một kịch bản bảng conntrack bị quá tải và cách bạn phân biệt triệu chứng của nó với lỗi ở tầng ứng dụng.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Kubernetes — Service và externalTrafficPolicy: https://kubernetes.io/docs/concepts/services-networking/service/
+- Spring Boot — Forward Headers: https://docs.spring.io/spring-boot/reference/web/servlet.html
+- Kubernetes — Virtual IPs và Service Proxies: https://kubernetes.io/docs/reference/networking/virtual-ips/
+
+## Đọc thêm
+
+Không có.

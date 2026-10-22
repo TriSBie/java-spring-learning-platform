@@ -1,0 +1,180 @@
+---
+title: "Định Cỡ Heap Trong Container và OOMKilled"
+module: 8
+level: "Senior"
+duration: 50
+order: 2
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Giải thích được cơ chế ergonomics của JVM trong container và tính được heap tối đa từ giới hạn bộ nhớ bằng tỉ lệ RAM phần trăm.
+- Phân biệt được ba loại hết bộ nhớ: heap đầy do ứng dụng, native hết bộ nhớ và container bị kill, kèm dấu hiệu nhận biết từng loại.
+- Viết được `Dockerfile` và cấu hình triển khai đặt giới hạn bộ nhớ nhất quán cho một service Nova Loyalty, chừa đủ phần cho vùng ngoài heap.
+
+## Vì sao cần biết
+
+Mọi service Nova Loyalty đều chạy trong container có giới hạn bộ nhớ cứng. Sự cố kinh điển của team là pod bị `OOMKilled` lặp lại trong giờ cao điểm dù biểu đồ heap không hề chạm trần: phần bộ nhớ còn lại bị metaspace, direct buffer và stack ăn hết vì heap được đặt quá tham lam theo thói quen máy vật lý. Từ khi JVM nhận biết container, cách đúng là để JVM tự suy heap từ giới hạn container theo tỉ lệ phần trăm, đồng thời chừa ngân sách rõ ràng cho mọi vùng ngoài heap — thay vì đặt heap cố định theo con số thuộc về một môi trường khác.
+
+## Nội dung chính
+
+### Ergonomics: JVM tự thích nghi với container
+
+JVM hiện đại đọc được giới hạn bộ nhớ của container qua cơ chế cgroup.
+Khi không đặt heap tường minh, JVM suy ra heap tối đa theo một tỉ lệ mặc định của bộ nhớ được cấp.
+Tỉ lệ này có thể điều chỉnh bằng tham số phần trăm RAM dành cho heap.
+Điểm quan trọng là phần trăm đó tính trên giới hạn container, không phải bộ nhớ của máy host.
+
+Nếu ứng dụng hoặc thư viện đặt heap cố định bằng tham số Xmx tuyệt đối, con số đó không tự co giãn theo môi trường.
+Cùng một image chạy ở hai nơi có giới hạn khác nhau sẽ cư xử hoàn toàn khác nhau.
+Vì vậy image nên mang theo chính sách tỉ lệ, còn con số tuyệt đối thuộc về cấu hình triển khai từng môi trường.
+
+### Ba loại hết bộ nhớ phải phân biệt
+
+Loại thứ nhất là heap thật sự đầy: JVM ném lỗi hết bộ nhớ heap và tiến trình thường còn sống để ghi log.
+Loại thứ hai là vùng native hoặc direct hết trong khi heap còn chỗ, lỗi xuất hiện ở tầng buffer hoặc thread creation.
+Loại thứ ba nguy hiểm nhất là container bị hệ thống kill vì tổng bộ nhớ vượt giới hạn: tiến trình biến mất không kịp ghi log Java nào.
+Nhìn mã thoát và sự kiện của nền tảng triển khai là cách phân biệt nhanh nhất giữa ba loại này.
+
+<Mermaid chart={`flowchart TD
+  Pod[Pod bị chết] --> Check{{Mã thoát và sự kiện}}
+  Check -->|OOMKilled của nền tảng| Total[Tổng bộ nhớ vượt giới hạn container]
+  Check -->|Lỗi hết heap trong log Java| Heap[Heap đầy do object sống]
+  Check -->|Lỗi direct hoặc thread| Native[Vùng ngoài heap vượt ngân sách]`} label="Cây chẩn đoán ba loại hết bộ nhớ trong container" />
+
+### Ngân sách bộ nhớ đầy đủ
+
+Một ngân sách đúng gồm heap, metaspace, direct memory, stack theo số thread và phần đệm cho JVM cùng thư viện native.
+Service dùng nhiều kết nối mạng và buffer cần phần direct lớn hơn service tính toán thuần túy.
+Consumer của Nova còn phải cộng thêm dữ liệu đang xử lý dở trong cửa sổ draining.
+Mọi con số trong ngân sách đều là điểm khởi đầu để đo, không phải hằng số bất biến cho mọi service.
+
+Để biến ngân sách bộ nhớ thành thói quen của team, hãy thực hành theo danh sách sau.
+
+- Mọi service mới đều khai báo giới hạn bộ nhớ ngay từ lần triển khai đầu tiên, không để mặc định.
+- Biểu đồ vận hành luôn hiển thị tổng bộ nhớ tiến trình cạnh giới hạn container, không chỉ biểu đồ heap.
+- Mọi sự cố chết tiến trình đều được phân loại vào một trong ba loại hết bộ nhớ trước khi đóng.
+- Ngân sách từng vùng được ghi trong tài liệu của service và review lại khi số thread hoặc thư viện thay đổi.
+
+Một bài học đắt giá là heap nhỏ lại đôi khi làm ứng dụng khỏe hơn trong container.
+Heap nhỏ hơn nghĩa là thu gom rẻ hơn và phần đệm cho vùng ngoài heap rộng hơn.
+Quyết định heap tối ưu vì vậy là bài toán cân bằng của cả tiến trình, không phải bài toán tối đa hóa một vùng.
+Khi nâng giới hạn container, đừng quên rà lại tỉ lệ heap: cùng một tỉ lệ trên giới hạn lớn hơn cho heap lớn hơn và hành vi thu gom khác đi.
+Mọi thay đổi giới hạn đều phải kèm một vòng quan sát qua giờ cao điểm trước khi coi là xong.
+Đó là kỷ luật giúp Nova tránh lặp lại sự cố chết pod hàng loạt chỉ vì một thay đổi cấu hình tưởng như vô hại.
+
+Ghi nhớ nhanh cho ca trực khi gặp pod chết vì bộ nhớ.
+
+- Mở sự kiện của nền tảng trước, tìm đúng dòng mô tả nguyên nhân kill nếu có.
+- Đối chiếu thời gian chết với biểu đồ tổng bộ nhớ, không chỉ biểu đồ heap.
+- Kiểm tra xem có thay đổi cấu hình hoặc phiên bản nào vừa được triển khai hay không.
+- Ghi phân loại sự cố vào biên bản trước khi thử thay đổi cấu hình.
+- Mọi thay đổi tỉ lệ heap đều phải có người thứ hai review như thay đổi code.
+- Sau khi sửa, quan sát ít nhất qua một chu kỳ cao điểm rồi mới đóng sự cố.
+
+Đọc lại checklist của bài và tự chấm trung thực trước khi chuyển sang bài tiếp theo trong module.
+Mọi khoảng trống kiến thức lộ ra lúc này đều rẻ hơn rất nhiều so với khi nó lộ ra trong một sự cố production.
+
+## Code
+
+Cấu hình gồm tham số JVM trong `Dockerfile` và giới hạn tài nguyên trong YAML triển khai. Hai nơi này phải nhất quán với nhau.
+
+```dockerfile filename=Dockerfile
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+COPY target/app.jar app.jar
+ENV JAVA_OPTS="-XX:MaxRAMPercentage=70.0 -XX:InitialRAMPercentage=40.0 -XX:+ExitOnOutOfMemoryError"
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]
+```
+
+```yaml filename=deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nova-points-api
+spec:
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app: nova-points-api
+    spec:
+      containers:
+        - name: app
+          image: nova/points-api:latest
+          resources:
+            requests:
+              memory: "768Mi"
+            limits:
+              memory: "1Gi"
+          env:
+            - name: JAVA_OPTS
+              value: "-XX:MaxRAMPercentage=70.0"
+```
+
+```java filename=MemoryBudgetPrinter.java
+package com.nova.loyalty.perf;
+
+public class MemoryBudgetPrinter {
+
+    public static void main(String[] args) {
+        Runtime runtime = Runtime.getRuntime();
+        long maxHeapMb = runtime.maxMemory() / (1024L * 1024L);
+        System.out.println("maxHeapMb=" + maxHeapMb);
+        System.out.println("availableProcessors=" + runtime.availableProcessors());
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Đặt heap cố định bằng dung lượng của máy cũ
+
+- **Triệu chứng:** Cùng image chạy tốt ở môi trường cũ nhưng bị kill liên tục khi chuyển sang container có giới hạn nhỏ hơn.
+- **Nguyên nhân:** Heap tuyệt đối không co giãn theo giới hạn container, cộng thêm vùng ngoài heap dễ dàng vượt trần tổng.
+- **Fix:** Dùng tỉ lệ phần trăm RAM cho heap trong image và đặt giới hạn bộ nhớ tường minh ở cấu hình triển khai từng môi trường.
+
+### 2. Đặt tỉ lệ heap quá cao vì sợ lãng phí bộ nhớ
+
+- **Triệu chứng:** Pod bị kill ở giờ cao điểm dù biểu đồ heap chưa chạm trần heap đã cấu hình.
+- **Nguyên nhân:** Phần trăm heap tham lam không chừa đủ cho metaspace, direct buffer và stack khi tải tăng.
+- **Fix:** Hạ tỉ lệ heap xuống mức chừa ngân sách rõ ràng cho vùng ngoài heap và kiểm chứng bằng sự cố tải thật.
+
+### 3. Không đặt giới hạn bộ nhớ cho container
+
+- **Triệu chứng:** Một service rò rỉ bộ nhớ làm ảnh hưởng toàn bộ node và các pod hàng xóm.
+- **Nguyên nhân:** Thiếu giới hạn cứng khiến cơ chế ergonomics của JVM suy heap theo bộ nhớ host thay vì ngân sách của service.
+- **Fix:** Luôn đặt request và limit bộ nhớ cho mọi workload production và cảnh báo khi mức dùng tiến gần giới hạn.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Tính toán:** Với giới hạn container cho trước, tính heap tối đa ở ba mức tỉ lệ khác nhau và phần còn lại cho vùng ngoài heap; nêu mức bạn chọn cho consumer và lý do.
+2. **Đọc sự kiện:** Viết quy trình 5 bước phân biệt pod chết do hết heap với pod bị nền tảng kill vì tổng bộ nhớ, dựa trên log và sự kiện.
+3. **Viết tay:** Soạn `Dockerfile` và đoạn cấu hình triển khai nhất quán cho một service đọc nhiều buffer mạng.
+4. **Phản biện:** Vì sao đặt heap bằng đúng giới hạn container luôn là quyết định sai dù trông như tận dụng tối đa tài nguyên?
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Kubernetes — Resource Management for Pods and Containers: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+- Docker Docs — Dockerfile Reference và runtime constraints: https://docs.docker.com/engine/reference/builder/
+- OpenJDK — JDK 21 Documentation: https://openjdk.org/projects/jdk/21/
+
+## Đọc thêm
+
+Không có.

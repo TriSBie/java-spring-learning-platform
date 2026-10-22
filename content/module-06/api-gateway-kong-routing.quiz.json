@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Phân biệt được Service, Route, Consumer và Plugin trong mô hình của Kong.",
+    "Viết được file khai báo DB-less định tuyến ba nhóm /v4/{gs,os,ws}/* về đúng upstream.",
+    "Gắn được plugin rate limiting ở mức route và nêu khóa đếm phù hợp.",
+    "Giải thích được vì sao service vẫn phải tự verify JWT dù gateway đã kiểm tra ở biên.",
+    "Nhận diện được rủi ro rate limit theo IP khi địa chỉ nguồn đã bị SNAT.",
+    "Vẽ được ranh giới trách nhiệm đúng giữa gateway và service."
+  ],
+  "quiz": [
+    {
+      "answerIndex": 1,
+      "explanation": "Route là điều kiện khớp traffic (path, host, method, header) và trỏ vào một Service đích.",
+      "options": [
+        "Một loại cơ sở dữ liệu của Kong",
+        "Điều kiện khớp traffic gắn vào một Service để quyết định định tuyến",
+        "Một chứng thư TLS",
+        "Một người dùng đã đăng ký"
+      ],
+      "question": "Route trong Kong là gì?"
+    },
+    {
+      "answerIndex": 1,
+      "explanation": "Service trong Kong là định nghĩa upstream đích với thông số kết nối, timeout và retry.",
+      "options": [
+        "Một nhóm người dùng",
+        "Một upstream đích mà Route trỏ tới",
+        "Một plugin bảo mật",
+        "Một bản ghi DNS"
+      ],
+      "question": "Service trong Kong đại diện cho điều gì?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Phòng thủ nhiều lớp: traffic nội bộ không qua gateway vẫn vào được service, nên service phải tự verify và phân quyền.",
+      "options": [
+        "Đúng, vì traffic nội bộ có thể vòng qua gateway, service phải tự bảo vệ theo nguyên tắc nhiều lớp",
+        "Chỉ cần khi service có API công khai riêng",
+        "Sai, gateway đã đủ cho mọi trường hợp",
+        "Chỉ cần với route vận hành"
+      ],
+      "question": "Nhận định service vẫn phải tự verify JWT dù gateway đã kiểm tra ở biên có đúng không?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Plugin có thể gắn ở mức toàn cục, Service, Route hoặc Consumer; mức cụ thể hơn thắng khi có xung đột áp dụng.",
+      "options": [
+        "Gắn được ở mức toàn cục, Service, Route hoặc Consumer, mức cụ thể hơn được ưu tiên",
+        "Chỉ gắn được toàn cục",
+        "Plugin không có mức áp dụng",
+        "Chỉ gắn được theo Consumer"
+      ],
+      "question": "Plugin của Kong có thể gắn ở những mức nào?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Trong giới hạn của khóa học, DB-less nghĩa là toàn bộ cấu hình nằm trong một file khai báo được nạp nguyên tử, quản lý qua Git như code.",
+      "options": [
+        "Kong tự sinh cấu hình từ traffic",
+        "Kong chạy không cần cấu hình",
+        "Chỉ dùng cho môi trường test",
+        "Cấu hình nằm trong một file khai báo được nạp nguyên tử, không có database quản trị riêng"
+      ],
+      "question": "Chế độ declarative DB-less của Kong nghĩa là gì?"
+    },
+    {
+      "answerIndex": 0,
+      "explanation": "Khi nguồn bị SNAT, mọi client mang cùng một IP đã dịch; khóa theo IP khiến giới hạn áp chung cho tất cả.",
+      "options": [
+        "Vì sau SNAT mọi request mang cùng IP đã dịch nên giới hạn áp chung và gây chặn oan",
+        "Vì plugin rate limiting không hỗ trợ IP",
+        "Vì IP thay đổi sau mỗi request HTTP",
+        "Vì trình duyệt không gửi IP"
+      ],
+      "question": "Vì sao rate limit theo IP nguy hiểm trong kiến trúc của Nova?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Gateway mạnh ở chính sách cắt ngang tại biên; quyết định cần dữ liệu nghiệp vụ như quyền trên ví điểm thuộc về service.",
+      "options": [
+        "Toàn bộ bảo mật phải ở gateway, service không cần gì",
+        "Gateway thay thế hoàn toàn DNS nội bộ",
+        "Gateway nên chứa cả logic tính điểm",
+        "Mọi chính sách cắt ngang ở biên: định tuyến, rate limit biên, gắn correlation id; quyết định nghiệp vụ chi tiết ở service"
+      ],
+      "question": "Việc nào thuộc về gateway, việc nào thuộc về service?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Consumer là danh tính phía gọi đã biết, cho phép áp chính sách và quota riêng theo đối tác hoặc ứng dụng.",
+      "options": [
+        "Một loại route đặc biệt",
+        "Một pod chạy phía sau gateway",
+        "Danh tính của phía gọi đã biết, dùng để áp chính sách và quota riêng",
+        "Nhật ký traffic của gateway"
+      ],
+      "question": "Consumer trong Kong dùng để làm gì?"
+    },
+    {
+      "answerIndex": 3,
+      "explanation": "Vượt ngưỡng rate limit được trả 429 Too Many Requests kèm thông tin thử lại, theo chuẩn HTTP.",
+      "options": [
+        "404 như không tồn tại route",
+        "200 kèm thông điệp cảnh báo",
+        "500 trong mọi trường hợp",
+        "429 Too Many Requests"
+      ],
+      "question": "Khi vượt ngưỡng rate limiting, client nên nhận mã nào?"
+    },
+    {
+      "answerIndex": 2,
+      "explanation": "Ba tiền tố gs, os, ws là ba bề mặt client khác nhau nên cần route và chính sách tách bạch, tránh một route rộng nuốt tất cả.",
+      "options": [
+        "Để tăng tốc độ DNS",
+        "Chúng là ba bản sao dự phòng của cùng một service",
+        "Chúng là ba bề mặt client khác nhau cần route và chính sách riêng, tách bạch để không chảy nhầm traffic",
+        "Chỉ để URL trông gọn hơn"
+      ],
+      "question": "Vì sao Nova tách route theo ba tiền tố gs, os và ws?"
+    }
+  ]
+}

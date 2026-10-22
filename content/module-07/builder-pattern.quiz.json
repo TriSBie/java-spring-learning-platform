@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Dựng được đối tượng bất biến nhiều trường tùy chọn bằng Builder fluent.",
+    "Đặt được validation tập trung trong `build()` với thông điệp lỗi rõ ràng.",
+    "Thiết lập được giá trị mặc định hợp lý cho các trường tùy chọn.",
+    "Giải thích được rủi ro nhầm thứ tự tham số của constructor dài.",
+    "Nhận biết được khi Builder là over-engineering so với record hoặc factory.",
+    "Áp dụng được pattern cho criteria truy vấn trên datasource report của Nova Loyalty."
+  ],
+  "quiz": [
+    {
+      "question": "Validation của Builder nên đặt ở đâu để mọi đường tạo đối tượng đều được kiểm tra?",
+      "options": [
+        "Ở từng method setter của Builder",
+        "Tập trung trong `build()`",
+        "Ở service gọi Builder",
+        "Ở database"
+      ],
+      "answerIndex": 1,
+      "explanation": "build() là cổng duy nhất sinh đối tượng hoàn chỉnh, nên validation tập trung ở đó đảm bảo không đường nào lách qua được."
+    },
+    {
+      "question": "Vấn đề chính của constructor có 8 tham số, nhiều tham số cùng kiểu, là gì?",
+      "options": [
+        "Java không hỗ trợ constructor dài",
+        "Constructor không thể là private",
+        "Dễ gọi nhầm thứ tự mà compiler không phát hiện",
+        "Không thể đặt giá trị mặc định trong Java"
+      ],
+      "answerIndex": 2,
+      "explanation": "Các tham số cùng kiểu hoán đổi vị trí vẫn biên dịch được, tạo bug âm thầm. Builder gọi theo tên nên loại bỏ rủi ro này."
+    },
+    {
+      "question": "Đối tượng do Builder tạo nên có tính chất gì để an toàn khi dùng trong truy vấn dài?",
+      "options": [
+        "Bất biến sau khi tạo",
+        "Mutable để tiện chỉnh sửa",
+        "Luôn là singleton",
+        "Phải kế thừa Builder"
+      ],
+      "answerIndex": 0,
+      "explanation": "Bất biến giúp tiêu chí không thay đổi giữa chừng khi truy vấn đang chạy và an toàn khi chia sẻ giữa các thread."
+    },
+    {
+      "question": "Fluent API tốt có đặc điểm nào?",
+      "options": [
+        "Mọi method đều tên một chữ cái",
+        "Không cần giá trị mặc định",
+        "Mỗi method trả về void",
+        "Chuỗi lời gọi đọc như câu mô tả bằng ngôn ngữ nghiệp vụ"
+      ],
+      "answerIndex": 3,
+      "explanation": "Tên method theo ngôn ngữ nghiệp vụ và trả về chính Builder giúp chuỗi gọi tự mô tả, người review đọc hiểu ngay."
+    },
+    {
+      "question": "Khi nào Builder là lựa chọn thừa?",
+      "options": [
+        "Đối tượng có 6 trường tùy chọn",
+        "Đối tượng chỉ có 2 trường bắt buộc và không có tùy chọn",
+        "Cần validation tổ hợp nhiều trường",
+        "Nhiều nơi gọi với các tổ hợp khác nhau"
+      ],
+      "answerIndex": 1,
+      "explanation": "Ít trường và không có tổ hợp tùy chọn thì constructor hoặc static factory gọn hơn nhiều so với một class Builder riêng."
+    },
+    {
+      "question": "Vì sao cần sao chép phòng thủ với trường dạng collection trong Builder?",
+      "options": [
+        "Để Builder chạy nhanh hơn",
+        "Vì Java yêu cầu vậy",
+        "Để dùng được record",
+        "Để thay đổi sau này trên collection gốc không làm đối tượng đã build thay đổi theo"
+      ],
+      "answerIndex": 3,
+      "explanation": "Đối tượng bất biến chỉ thật sự bất biến khi các thành phần mutable bên trong cũng được sao chép hoặc bọc bất biến."
+    },
+    {
+      "question": "Giá trị mặc định nên được đặt ở đâu?",
+      "options": [
+        "Ở mỗi nơi gọi",
+        "Trong database",
+        "Trong Builder, để nơi gọi chỉ ghi rõ phần khác mặc định",
+        "Không nên có mặc định"
+      ],
+      "answerIndex": 2,
+      "explanation": "Mặc định tập trung trong Builder giúp lời gọi ngắn gọn và nhất quán; nơi gọi chỉ nêu phần đặc thù của báo cáo."
+    },
+    {
+      "question": "Lỗi validate trong build() nên được truyền đạt thế nào?",
+      "options": [
+        "Ném exception kèm tên trường và điều kiện bị vi phạm",
+        "Nuốt lỗi và trả về null",
+        "Ghi log rồi vẫn tạo đối tượng",
+        "Trả về đối tượng với giá trị sửa tự động"
+      ],
+      "answerIndex": 0,
+      "explanation": "Thông điệp rõ ràng giúp người gọi sửa đúng trường sai ngay, thay vì mò mẫm từ một lỗi chung chung."
+    },
+    {
+      "question": "Record của Java 21 có thay thế hoàn toàn Builder không?",
+      "options": [
+        "Có, trong mọi trường hợp",
+        "Record không bất biến",
+        "Không: record tốt cho dữ liệu bất biến đơn giản nhưng không giải quyết nhiều trường tùy chọn và mặc định",
+        "Record không dùng được trong Spring"
+      ],
+      "answerIndex": 2,
+      "explanation": "Record và Builder bổ sung nhau: record cho carrier đơn giản, Builder cho việc dựng đối tượng phức tạp có mặc định và validation tổ hợp."
+    },
+    {
+      "question": "Dấu hiệu criteria đang bị nhồi quá nhiều trường là gì?",
+      "options": [
+        "Builder có đúng 5 method",
+        "Không ai phân biệt được trường bắt buộc và tùy chọn, criteria dùng cho các báo cáo khác bản chất",
+        "Có validation trong build",
+        "Đối tượng là bất biến"
+      ],
+      "answerIndex": 1,
+      "explanation": "Khi criteria trở thành túi trường dùng chung cho mọi báo cáo, nên tách theo nhóm báo cáo cùng bản chất."
+    }
+  ]
+}

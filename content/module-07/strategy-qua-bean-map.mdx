@@ -1,0 +1,183 @@
+---
+title: "Strategy qua Spring Bean Map"
+module: 7
+level: "Junior"
+duration: 40
+order: 1
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Thiết kế được interface `PointsCalculator` với ít nhất 3 implementation và chọn đúng implementation tại runtime chỉ bằng key giao dịch.
+- Tiêm được toàn bộ strategy vào service qua `Map<String, PointsCalculator>` và giải thích được cơ chế đặt tên bean quyết định key của map.
+- Viết được unit test cho từng strategy độc lập và test chọn strategy, đạt coverage cho nhánh fallback khi key không tồn tại.
+
+## Vì sao cần biết
+
+Ở Nova Loyalty, điểm được tính khác nhau theo loại giao dịch: mua hàng tích điểm theo tỉ lệ, đổi quà trừ điểm theo bảng giá, giao dịch đối tác lại có hệ số riêng và trần điểm. Nếu nhét hết vào một method với chuỗi `if/else` dài, mỗi lần thêm đối tác mới cả team phải sửa cùng một file, review khó và regression lan rộng. Strategy qua bean map cho phép mỗi quy tắc là một bean riêng, thêm loại giao dịch mới chỉ là thêm một class mới — đúng tinh thần hệ thống đang chạy Java 21 và Spring Boot 3.3 tại Nova Loyalty.
+
+## Nội dung chính
+
+### Vấn đề
+
+Service tính điểm ban đầu của Nova Loyalty có một method dài xử lý mọi loại giao dịch.
+Mỗi loại có công thức, làm tròn và giới hạn khác nhau.
+Thêm một loại mới đồng nghĩa sửa method cũ, chạm vào code đã ổn định.
+Test cũng phải dựng lại toàn bộ ngữ cảnh chỉ để kiểm tra một nhánh.
+
+Dấu hiệu nhận biết vấn đề này:
+
+- Method có nhiều nhánh theo một trường phân loại như `type` hoặc `source`.
+- Các nhánh ít dùng chung dữ liệu ngoài vài tham số đầu vào.
+- Business rule thay đổi độc lập theo từng loại.
+
+### Giải pháp
+
+Định nghĩa một interface chung, mỗi quy tắc là một implementation.
+Spring tự gom mọi bean cùng type vào một `Map` khi ta khai báo tham số dạng map.
+Key của map là tên bean, value là strategy tương ứng.
+Service chỉ tra cứu theo key suy ra từ giao dịch rồi ủy quyền việc tính toán.
+
+<Mermaid chart={`flowchart LR
+  Req[Giao dịch điểm] --> Svc[PointsService]
+  Svc -->|tra cứu theo type| Map[Map strategy]
+  Map --> A[EarnCalculator]
+  Map --> B[RedeemCalculator]
+  Map --> C[PartnerCalculator]`} label="Strategy qua bean map: service tra cứu calculator theo loại giao dịch" />
+
+Quy ước đặt tên phải rõ ràng và ổn định.
+Nên đặt tên bean tường minh bằng annotation thay vì phụ thuộc tên class mặc định.
+Khi key không tồn tại, service phải ném lỗi nghiệp vụ rõ ràng thay vì trả về 0 điểm.
+
+### Trade-off
+
+Ưu điểm là mở rộng dễ, test từng strategy độc lập, giảm xung đột khi nhiều người cùng sửa.
+Nhược điểm là số lượng class tăng và luồng thực thi khó đọc hơn vì phải tra cứu map.
+Pattern này chỉ đáng dùng khi số loại từ ba trở lên hoặc khi quy tắc thay đổi độc lập.
+Với đúng hai nhánh ổn định, một method nhỏ đôi khi vẫn đơn giản và dễ bảo trì hơn.
+
+Một chi tiết thực hành quan trọng là cách suy ra key từ giao dịch.
+Key nên đến từ một nguồn sự thật duy nhất, ví dụ mã loại giao dịch đã chuẩn hóa ở biên vào của hệ thống.
+Đừng để mỗi nơi gọi tự viết hoa, viết thường hoặc dịch key theo cách riêng.
+Viết một test liệt kê toàn bộ key mong đợi và đối chiếu với các key thật có trong context khi khởi động.
+Test này rẻ nhưng bắt được gần như mọi lỗi đặt tên bean ngay từ vòng kiểm tra tự động.
+
+## Code
+
+Package mẫu là `com.nova.loyalty.points`. Không cần thêm dependency ngoài `spring-boot-starter`.
+
+```java filename=PointsCalculator.java
+package com.nova.loyalty.points;
+
+import org.springframework.stereotype.Component;
+
+public interface PointsCalculator {
+    long calculate(PointsTransaction tx);
+}
+
+record PointsTransaction(String memberId, String type, long amount, int partnerFactor) {
+}
+
+@Component("EARN")
+class EarnPointsCalculator implements PointsCalculator {
+    @Override
+    public long calculate(PointsTransaction tx) {
+        return tx.amount() / 1_000L;
+    }
+}
+
+@Component("REDEEM")
+class RedeemPointsCalculator implements PointsCalculator {
+    @Override
+    public long calculate(PointsTransaction tx) {
+        return -Math.abs(tx.amount());
+    }
+}
+
+@Component("PARTNER")
+class PartnerPointsCalculator implements PointsCalculator {
+    @Override
+    public long calculate(PointsTransaction tx) {
+        long raw = (tx.amount() / 1_000L) * Math.max(1, tx.partnerFactor());
+        return Math.min(raw, 10_000L);
+    }
+}
+```
+
+```java filename=PointsService.java
+package com.nova.loyalty.points;
+
+import java.util.Map;
+import org.springframework.stereotype.Service;
+
+@Service
+public class PointsService {
+
+    private final Map<String, PointsCalculator> calculators;
+
+    public PointsService(Map<String, PointsCalculator> calculators) {
+        this.calculators = Map.copyOf(calculators);
+    }
+
+    public long calculatePoints(PointsTransaction tx) {
+        PointsCalculator calculator = calculators.get(tx.type());
+        if (calculator == null) {
+            throw new IllegalArgumentException("Unsupported transaction type: " + tx.type());
+        }
+        return calculator.calculate(tx);
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Dùng tên class mặc định làm key của map
+
+- **Triệu chứng:** Thêm strategy mới nhưng service vẫn báo unsupported type dù bean đã được tạo.
+- **Nguyên nhân:** Key mặc định suy từ tên class viết thường chữ đầu, không khớp với mã loại giao dịch trong database.
+- **Fix:** Đặt tên bean tường minh trong annotation cho khớp với mã loại giao dịch và viết test liệt kê toàn bộ key.
+
+### 2. Nhét fallback im lặng trả về 0 điểm
+
+- **Triệu chứng:** Giao dịch lạ được ghi nhận thành công nhưng khách không nhận được điểm nào.
+- **Nguyên nhân:** Code bắt trường hợp thiếu strategy bằng cách trả giá trị mặc định để tránh exception.
+- **Fix:** Ném exception nghiệp vụ kèm log có cấu trúc khi thiếu strategy, để lỗi lộ ra ngay ở môi trường test.
+
+### 3. Strategy vẫn phụ thuộc lẫn nhau qua service
+
+- **Triệu chứng:** Sửa một calculator làm hỏng test của calculator khác.
+- **Nguyên nhân:** Các implementation gọi qua service trung gian thay vì độc lập, tạo vòng phụ thuộc ẩn.
+- **Fix:** Giữ mỗi strategy thuần túy: chỉ nhận input, trả output, không gọi strategy khác.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Thiết kế:** Liệt kê 4 loại giao dịch điểm của một hệ loyalty bất kỳ, viết interface và quy ước key cho từng loại.
+2. **Đọc code:** Trong `PointsService`, điều gì xảy ra nếu hai bean cùng tên được khai báo? Tra cứu tài liệu Spring về bean overriding và ghi lại kết luận.
+3. **Viết tay:** Viết một strategy mới cho giao dịch hoàn điểm (refund) có quy tắc không vượt quá số điểm đã cộng ban đầu.
+4. **Phản biện:** Nêu một tình huống mà Strategy qua bean map là over-engineering và cách đơn giản hơn nên được chọn.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Framework — Dependency Injection và collection injection: https://docs.spring.io/spring-framework/reference/core/beans/dependencies/factory-collaborators.html
+- Spring Boot — Reference Documentation: https://docs.spring.io/spring-boot/reference/
+- Dev.java — Java 21 Learning Trail: https://dev.java/learn/
+
+## Đọc thêm
+
+Không có.

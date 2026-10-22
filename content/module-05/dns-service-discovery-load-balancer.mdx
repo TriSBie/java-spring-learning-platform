@@ -1,0 +1,213 @@
+---
+title: "DNS, service discovery và load balancer trong Kubernetes"
+module: 5
+level: "Middle"
+duration: 45
+order: 3
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Kafka 3.8"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Giải thích được cách phân giải DNS trong Kubernetes biến tên Service thành địa chỉ ảo và tới các pod phía sau.
+- Phân biệt được service discovery phía client và phía server, cùng vai trò của readiness probe trong việc một pod có nhận traffic hay không.
+- So sánh được load balancer tầng 4 (L4) và tầng 7 (L7) cùng các thuật toán chia tải phổ biến để chọn đúng cho từng loại traffic của Nova Loyalty.
+
+## Vì sao cần biết
+
+Nova Loyalty chạy nhiều pod cho mỗi service, pod chết và được tạo lại liên tục với địa chỉ IP mới. Không ai cấu hình tay danh sách IP đó: client gọi một cái tên, hệ thống tự tìm đúng pod đang khỏe. Khi sự cố xảy ra — một phiên bản mới nhận traffic khi chưa sẵn sàng, DNS trả kết quả cũ, hoặc thuật toán chia tải dồn hết traffic vào một pod — biểu hiện bên ngoài đều giống nhau là request lỗi rải rác rất khó tái hiện. Hiểu chuỗi DNS, discovery và load balancing giúp bạn khoanh đúng mắt xích hỏng thay vì khởi động lại mọi thứ theo cảm tính.
+
+## Nội dung chính
+
+### DNS trong Kubernetes
+
+Mỗi Service trong Kubernetes có một tên DNS đầy đủ dạng `ten-service.namespace.svc.cluster.local` (phần miền có thể thay đổi theo cấu hình cluster). Từ trong cùng namespace, chỉ cần tên ngắn của service là đủ. Cụm DNS của cluster (thường là CoreDNS) trả về địa chỉ IP ảo của Service (ClusterIP) hoặc, với headless service, trả về trực tiếp danh sách IP của các pod.
+
+Hai bẫy kinh điển phía Java:
+
+- JVM và thư viện HTTP có thể cache kết quả DNS lâu hơn kỳ vọng; khi backend thay đổi, client vẫn gọi địa chỉ cũ trong một thời gian.
+- Việc phân giải tên ngắn phụ thuộc vào search domain trong cấu hình DNS của pod; mang tên ngắn sang môi trường khác có thể phân giải sai hoặc không phân giải được.
+
+### Service discovery: ai biết danh sách backend
+
+Service discovery trả lời câu hỏi "hiện có những instance nào đang khỏe của service X":
+
+- Phía server (server-side): client gọi một địa chỉ ổn định (Service/ClusterIP hoặc load balancer), hạ tầng tự chọn pod đích. Đây là mô hình mặc định trong Kubernetes và là lựa chọn đơn giản, ít việc cho phía ứng dụng.
+- Phía client (client-side): client tự lấy danh sách instance từ một registry rồi tự chọn theo thuật toán riêng. Mô hình này cho kiểm soát tinh vi hơn nhưng ứng dụng phải tự lo vòng đời danh sách, health và thuật toán chọn.
+
+Đừng trộn lẫn hai mô hình mà không có lý do rõ ràng; phần lớn service nội bộ của Nova nên ở mô hình phía server do Kubernetes cung cấp.
+
+### Readiness quyết định việc nhận traffic
+
+Một pod chỉ nên nhận traffic khi nó thực sự sẵn sàng phục vụ: đã khởi động xong, đã nối được các datasource cần thiết (Nova có 5 datasource HikariCP: core, gift, report, legacy, audit — không dùng JTA) và đã warm up ở mức chấp nhận được. Readiness probe là cơ chế Kubernetes dùng để quyết định pod có nằm trong danh sách endpoint của Service hay không. Liveness probe là một khái niệm khác: nó quyết định pod có bị khởi động lại hay không. Nhầm hai loại probe này là nguyên nhân phổ biến của outage tự gây ra.
+
+<Mermaid chart={`flowchart TD
+  A[Client goi ten DNS cua Service] --> B[CoreDNS tra ClusterIP]
+  B --> C[kube-proxy / Service xu ly]
+  C --> D{Pod co readiness dat}
+  D -->|Co| E[Pod phien ban moi da san sang]
+  D -->|Co| F[Pod dang chay on dinh]
+  D -->|Khong| G[Pod vua khoi dong - khong nhan traffic]
+`} label="DNS cho địa chỉ ổn định của Service; readiness quyết định pod nào thực sự nằm trong danh sách nhận traffic." />
+
+### L4 và L7 load balancer
+
+- L4 (tầng vận chuyển): chia tải theo kết nối TCP/UDP, không hiểu HTTP. Nhanh, đơn giản, phù hợp cho traffic không phải HTTP hoặc khi không cần định tuyến theo nội dung.
+- L7 (tầng ứng dụng): hiểu HTTP, định tuyến được theo path, header, cookie; làm được termination TLS, giới hạn tốc độ và gắn thêm header. Gateway của Nova thuộc nhóm này khi nó định tuyến theo `/v4/{gs,os,ws}/*`.
+
+Thuật toán chia tải thường gặp:
+
+- Round robin: lần lượt đều nhau, hợp khi các pod tương đương và request đồng đều.
+- Least connections: ưu tiên pod ít kết nối nhất, hợp khi thời gian xử lý request chênh lệch lớn.
+- Consistent hashing / sticky theo khóa: giữ một khóa (ví dụ member id) về cùng một pod, chỉ dùng khi thực sự có trạng thái cục bộ, vì nó đánh đổi khả năng chia đều.
+
+## Code
+
+Ứng dụng không tự làm discovery trong mô hình Kubernetes chuẩn; việc của ứng dụng là khai báo readiness đúng và gọi service bạn qua tên DNS. Cấu hình Actuator readiness group trong Spring Boot:
+
+```yaml filename=application.yml
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,db
+        liveness:
+          include: livenessState
+server:
+  shutdown: graceful
+spring:
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+```
+
+Khai báo Service và Deployment với probe tách bạch (YAML Kubernetes):
+
+```yaml filename=nova-points-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: nova-points
+spec:
+  selector:
+    app: nova-points
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nova-points
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nova-points
+  template:
+    metadata:
+      labels:
+        app: nova-points
+    spec:
+      containers:
+        - name: app
+          image: registry.nova.example.com/nova-points:1.0.0
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+```
+
+Client gọi service bạn qua tên DNS ngắn trong cùng namespace bằng `RestClient`:
+
+```java filename=GiftServiceClient.java
+package com.nova.loyalty.points;
+
+import org.springframework.stereotype.Component;
+import org.springframework.web.client.RestClient;
+
+@Component
+public class GiftServiceClient {
+
+    private final RestClient restClient;
+
+    public GiftServiceClient(RestClient.Builder builder) {
+        this.restClient = builder
+                .baseUrl("http://nova-gift:8080")
+                .build();
+    }
+
+    public boolean isGiftAvailable(String giftCode) {
+        Boolean result = restClient.get()
+                .uri("/internal/gifts/{code}/available", giftCode)
+                .retrieve()
+                .body(Boolean.class);
+        return Boolean.TRUE.equals(result);
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Dùng liveness probe cho điều kiện sẵn sàng
+
+- **Triệu chứng:** Pod bị khởi động lại liên tục khi downstream chậm, dù bản thân pod không hỏng.
+- **Nguyên nhân:** Đưa kiểm tra phụ thuộc bên ngoài (database, service bạn) vào liveness probe; probe trượt khiến Kubernetes giết pod, tạo vòng lặp sập dây chuyền.
+- **Fix:** Liveness chỉ kiểm tra tiến trình còn sống đúng nghĩa; điều kiện sẵn sàng phục vụ thuộc về readiness probe.
+
+### 2. Cứng địa chỉ IP hoặc tên host của pod trong cấu hình
+
+- **Triệu chứng:** Sau mỗi lần deploy hoặc scale, client gọi vào địa chỉ không còn tồn tại.
+- **Nguyên nhân:** Pod có vòng đời ngắn và IP thay đổi; cấu hình cứng đi ngược hoàn toàn với mô hình discovery.
+- **Fix:** Luôn gọi qua tên DNS của Service, để hạ tầng duy trì danh sách endpoint theo readiness.
+
+### 3. Cache DNS phía client quá lâu
+
+- **Triệu chứng:** Backend đã được thay toàn bộ nhưng một phần traffic vẫn tới địa chỉ cũ trong thời gian dài.
+- **Nguyên nhân:** JVM hoặc thư viện mạng cache kết quả phân giải vượt quá thời gian sống kỳ vọng của bản ghi.
+- **Fix:** Kiểm tra và đặt rõ chính sách cache DNS cho runtime, ưu tiên mô hình Service với địa chỉ ảo ổn định để việc thay pod không phụ thuộc vào cache của client.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được; trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay, không có chấm tự động.
+
+1. Vẽ chuỗi đầy đủ từ lúc một service của Nova gọi tên `nova-gift` tới khi request chạm một pod cụ thể, ghi rõ vai trò của CoreDNS, Service và readiness ở từng bước.
+2. Cho ba kịch bản (deploy phiên bản mới, một pod bị quá tải cục bộ, một service không phải HTTP), chọn loại load balancer và thuật toán chia tải phù hợp, kèm lý do.
+3. Thiết kế readiness và liveness cho service điểm của Nova: liệt kê điều kiện thuộc về từng probe và điều kiện tuyệt đối không được đưa vào liveness.
+4. Mô tả một sự cố giả định do cache DNS và cách bạn xác minh nó khác với sự cố do readiness sai.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Kubernetes — DNS for Services and Pods: https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/
+- Kubernetes — Service: https://kubernetes.io/docs/concepts/services-networking/service/
+- Spring Boot — Actuator Health Probes: https://docs.spring.io/spring-boot/reference/actuator/endpoints.html
+
+## Đọc thêm
+
+Không có.

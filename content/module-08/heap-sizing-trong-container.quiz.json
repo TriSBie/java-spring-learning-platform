@@ -1,0 +1,122 @@
+{
+  "checklist": [
+    "Tính được heap tối đa từ giới hạn container theo tỉ lệ phần trăm RAM.",
+    "Giải thích được cơ chế ergonomics giúp JVM nhận biết giới hạn container.",
+    "Phân biệt được ba loại hết bộ nhớ qua log, mã thoát và sự kiện nền tảng.",
+    "Lập được ngân sách bộ nhớ đầy đủ gồm heap và mọi vùng ngoài heap.",
+    "Viết được cấu hình triển khai nhất quán giữa image và giới hạn tài nguyên.",
+    "Nêu được quy trình kiểm chứng cấu hình bộ nhớ bằng kịch bản tải thật."
+  ],
+  "quiz": [
+    {
+      "question": "Tham số tỉ lệ RAM cho heap hoạt động dựa trên cơ sở nào?",
+      "options": [
+        "Dung lượng RAM vật lý của máy host",
+        "Giới hạn bộ nhớ của container mà JVM nhận biết được",
+        "Kích thước file jar",
+        "Số lượng pod đang chạy"
+      ],
+      "answerIndex": 1,
+      "explanation": "JVM container-aware suy heap từ giới hạn cgroup của container. Đó là lý do cùng image cư xử nhất quán giữa các môi trường có giới hạn khác nhau."
+    },
+    {
+      "question": "Dấu hiệu đặc trưng của pod bị nền tảng kill vì tổng bộ nhớ là gì?",
+      "options": [
+        "Log Java ghi rõ lỗi hết heap kèm stack trace",
+        "Ứng dụng trả lỗi 500 cho mọi request",
+        "Tiến trình biến mất không có log Java tương ứng và sự kiện nền tảng ghi nhận bị kill vì vượt giới hạn",
+        "GC pause tăng dần trong nhiều giờ"
+      ],
+      "answerIndex": 2,
+      "explanation": "Khi hệ thống kill tiến trình từ bên ngoài, JVM không có cơ hội ghi log. Phải đối chiếu sự kiện nền tảng và mã thoát."
+    },
+    {
+      "question": "Vì sao không nên đặt heap bằng 100 phần trăm giới hạn container?",
+      "options": [
+        "Vì metaspace, direct memory, stack và native memory cũng cần bộ nhớ ngoài heap",
+        "Vì JVM cấm điều đó",
+        "Vì heap lớn làm chậm biên dịch",
+        "Vì container không cho phép"
+      ],
+      "answerIndex": 0,
+      "explanation": "Tổng bộ nhớ tiến trình luôn lớn hơn heap. Đặt heap bằng toàn bộ giới hạn đảm bảo tiến trình bị kill khi các vùng khác tăng lên."
+    },
+    {
+      "question": "Lợi ích của việc để image mang chính sách tỉ lệ thay vì heap tuyệt đối là gì?",
+      "options": [
+        "Image nhẹ hơn",
+        "Ứng dụng khởi động không cần JVM",
+        "Không cần đặt giới hạn container nữa",
+        "Cùng image thích nghi được với các giới hạn container khác nhau giữa các môi trường"
+      ],
+      "answerIndex": 3,
+      "explanation": "Chính sách tỉ lệ tách quyết định tương đối khỏi con số tuyệt đối của từng môi trường, giảm lỗi cấu hình khi triển khai lại."
+    },
+    {
+      "question": "Service dùng nhiều buffer mạng cần chú ý vùng bộ nhớ nào ngoài heap nhất?",
+      "options": [
+        "Metaspace",
+        "Direct memory cho buffer ngoài heap",
+        "Bộ nhớ của trình duyệt",
+        "Swap của host"
+      ],
+      "answerIndex": 1,
+      "explanation": "Buffer NIO và framework mạng thường cấp phát direct memory. Ngân sách cho vùng này phải được tính và giám sát riêng."
+    },
+    {
+      "question": "Đặt request bộ nhớ thấp hơn nhiều so với limit gây hệ quả gì cần cân nhắc?",
+      "options": [
+        "Không có hệ quả nào",
+        "JVM tự tắt ergonomics",
+        "Heap tự động bằng limit",
+        "Lập lịch và đảm bảo tài nguyên kém dự đoán hơn, pod dễ bị ảnh hưởng khi node chịu áp lực bộ nhớ"
+      ],
+      "answerIndex": 3,
+      "explanation": "Request là cơ sở lập lịch và bảo đảm; chênh lệch lớn với thực dùng làm hành vi khi node quá tải khó lường."
+    },
+    {
+      "question": "Khi tăng số thread nền tảng truyền thống, vùng nào tăng theo?",
+      "options": [
+        "Chỉ heap",
+        "Chỉ metaspace",
+        "Tổng stack của các thread, nằm ngoài heap",
+        "Không vùng nào tăng"
+      ],
+      "answerIndex": 2,
+      "explanation": "Mỗi platform thread giữ stack riêng ở native memory. Đây là một lý do virtual thread hấp dẫn cho workload chờ I/O."
+    },
+    {
+      "question": "Cách kiểm chứng cấu hình heap trong container đáng tin nhất là gì?",
+      "options": [
+        "Chạy kịch bản tải đại diện trong container có đúng giới hạn production và quan sát tổng bộ nhớ tiến trình cùng GC log",
+        "Đọc cấu hình và tin tưởng",
+        "Hỏi ý kiến trên diễn đàn",
+        "Đặt heap thật lớn rồi chờ sự cố"
+      ],
+      "answerIndex": 0,
+      "explanation": "Chỉ tải đại diện trong đúng giới hạn mới lộ được tổng nhu cầu thật của mọi vùng bộ nhớ."
+    },
+    {
+      "question": "Lỗi hết bộ nhớ heap trong log Java khác bị kill ở điểm nào?",
+      "options": [
+        "Không khác nhau",
+        "Lỗi heap chỉ xảy ra ban đêm",
+        "Lỗi heap do JVM chủ động ném khi heap đầy, tiến trình có cơ hội ghi log và xử lý; bị kill là hệ thống kết thúc tiến trình từ bên ngoài",
+        "Bị kill luôn kèm stack trace Java đầy đủ"
+      ],
+      "answerIndex": 2,
+      "explanation": "Phân biệt hai tình huống quyết định hướng sửa hoàn toàn khác nhau: tối ưu object sống hay lập lại ngân sách tổng."
+    },
+    {
+      "question": "Ngân sách bộ nhớ tốt cần liệt kê những thành phần nào?",
+      "options": [
+        "Chỉ heap tối đa",
+        "Heap, metaspace, direct memory, stack theo thread, bộ nhớ native của JVM và phần đệm an toàn",
+        "Chỉ heap và CPU",
+        "Dung lượng đĩa của container"
+      ],
+      "answerIndex": 1,
+      "explanation": "Mọi vùng đều rút từ cùng một giới hạn container. Ngân sách thiếu thành phần nào thì thành phần đó trở thành nguyên nhân sự cố."
+    }
+  ]
+}

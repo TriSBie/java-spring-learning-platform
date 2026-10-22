@@ -1,0 +1,190 @@
+---
+title: "gRPC và REST: chọn giao thức cho từng lời gọi"
+module: 5
+level: "Middle"
+duration: 45
+order: 5
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- So sánh được gRPC và REST trên các trục: định dạng dữ liệu, hợp đồng (contract), streaming, khả năng gỡ lỗi và hệ sinh thái client.
+- Giải thích được vai trò của Protocol Buffers và HTTP/2 trong gRPC, và hệ quả của dữ liệu nhị phân đối với việc quan sát traffic.
+- Quyết định được, cho từng lời gọi cụ thể trong Nova Loyalty, khi nào nên dùng gRPC và khi nào nên giữ REST.
+
+## Vì sao cần biết
+
+Nova Loyalty có cả hai loại traffic rất khác nhau: API ra ngoài cho đối tác và khách hàng qua gateway `/v4/{gs,os,ws}/*`, và các lời gọi nội bộ tần suất cao giữa service điểm, service quà và service tính khuyến mãi. Chọn một giao thức cho cả hai theo thói quen sẽ sai ở ít nhất một phía: ép gRPC ra bề mặt công khai làm khó đối tác và mất khả năng thử nhanh bằng công cụ HTTP thường; ngược lại, giữ JSON/REST cho mọi hop nội bộ nóng có thể bỏ lỡ lợi ích thật về chi phí serialize và hợp đồng chặt chẽ của gRPC. Bài này cho bạn khung quyết định, không cho đáp án một chiều.
+
+## Nội dung chính
+
+### REST: văn bản, phổ quát, dễ quan sát
+
+REST trên HTTP với JSON thắng ở tính phổ quát: mọi ngôn ngữ, mọi công cụ đều nói được; thử bằng dòng lệnh hay trình duyệt đều dễ; cache HTTP và hệ sinh thái gateway, tài liệu OpenAPI đều trưởng thành. Cái giá là chi phí serialize JSON, header lặp lại (HTTP/2 giảm phần này), và hợp đồng thường được mô tả ở tầng tài liệu thay vì được biên dịch thành code ở cả hai phía.
+
+Với API công khai cho đối tác, nơi người tích hợp không do bạn kiểm soát, REST gần như luôn là lựa chọn khởi đầu đúng.
+
+### gRPC: hợp đồng trước, nhị phân, trên HTTP/2
+
+gRPC định nghĩa service bằng Protocol Buffers (protobuf): một file `.proto` mô tả message và rpc, từ đó sinh stub cho client và server ở nhiều ngôn ngữ. Dữ liệu được serialize dạng nhị phân gọn hơn JSON trong nhiều trường hợp, và hợp đồng được kiểm chứng ở thời điểm biên dịch ở cả hai phía.
+
+gRPC chạy trên HTTP/2 nên thừa hưởng multiplexing và hỗ trợ streaming theo bốn kiểu: unary (một request, một response), server streaming, client streaming và bidirectional streaming. Streaming là điểm khác biệt thật sự cho các bài toán như truyền sự kiện liên tục giữa hai service nội bộ.
+
+Đánh đổi cần nhìn thẳng:
+
+- Dữ liệu nhị phân khó đọc khi gỡ lỗi; cần công cụ chuyên dụng thay vì nhìn thẳng vào traffic.
+- Trình duyệt không gọi gRPC gốc trực tiếp một cách tự nhiên; bề mặt cho web thường cần thêm lớp chuyển đổi như gRPC-Web hoặc một gateway REST.
+- Tiến hóa schema phải tuân thủ kỷ luật tương thích của protobuf (không tái dùng số trường đã xóa, thêm trường mới bằng số mới) nếu không sẽ vỡ client cũ một cách âm thầm.
+
+<Mermaid chart={`flowchart TD
+  A[Loi goi moi can thiet ke] --> B{Client co nam ngoai kiem soat cua team khong}
+  B -->|Co - doi tac, web, mobile ben ngoai| C[REST + JSON + OpenAPI]
+  B -->|Khong - noi bo hoan toan| D{Can streaming hoac hop dong chat va tan suat cao}
+  D -->|Co| E[gRPC + protobuf]
+  D -->|Khong ro rang| C
+`} label="Khung quyết định: bề mặt ngoài tầm kiểm soát ưu tiên REST; gRPC chỉ thắng rõ trong nội bộ khi cần streaming hoặc hợp đồng chặt ở tần suất cao." />
+
+### Tiến hóa hợp đồng ở hai phía
+
+Cả hai giao thức đều vỡ nếu đổi hợp đồng tùy tiện, chỉ khác cách phát hiện:
+
+- REST/OpenAPI: vỡ thường lộ ra ở runtime hoặc ở bước sinh client; cần kỷ luật versioning và test hợp đồng riêng.
+- Protobuf: nhiều lỗi đổi tên trường vô hại nhờ số trường là danh tính thật, nhưng đổi kiểu hoặc tái dùng số trường đã xóa sẽ gây hỏng dữ liệu khó thấy.
+
+gRPC không tự động cho bạn tương thích ngược; nó chỉ cho công cụ để giữ tương thích nếu team có kỷ luật.
+
+### Khả năng quan sát và vận hành
+
+Hệ sinh thái REST quanh gateway của Nova (định tuyến theo path, giới hạn tốc độ, log theo header) hoạt động tự nhiên vì mọi thứ đều là HTTP dễ đọc. Với gRPC, gateway và công cụ giám sát cần hiểu metadata, status code riêng của gRPC (khác mã HTTP) và cần reflection hoặc file proto để diễn giải nội dung. Đây là chi phí vận hành thật, phải tính vào quyết định chứ không chỉ so tốc độ serialize.
+
+## Code
+
+Định nghĩa hợp đồng bằng protobuf cho một lời gọi nội bộ kiểm tra số dư điểm, và phía Java dùng stub sinh ra từ file này:
+
+```proto filename=points.proto
+syntax = "proto3";
+
+package nova.loyalty.points.v1;
+
+option java_multiple_files = true;
+option java_package = "com.nova.loyalty.points.grpc.v1";
+
+service PointsService {
+  rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
+  rpc WatchBalance(WatchBalanceRequest) returns (stream BalanceChanged);
+}
+
+message GetBalanceRequest {
+  int64 member_id = 1;
+}
+
+message GetBalanceResponse {
+  int64 member_id = 1;
+  int64 balance = 2;
+  int64 version = 3;
+}
+
+message WatchBalanceRequest {
+  int64 member_id = 1;
+}
+
+message BalanceChanged {
+  int64 member_id = 1;
+  int64 balance_after = 2;
+  string reason = 3;
+}
+```
+
+Phía client Java dùng stub đã sinh, đặt deadline cho mọi lời gọi (tương đương kỷ luật timeout ở bài TCP):
+
+```java filename=GrpcPointsClient.java
+package com.nova.loyalty.points;
+
+import com.nova.loyalty.points.grpc.v1.GetBalanceRequest;
+import com.nova.loyalty.points.grpc.v1.GetBalanceResponse;
+import com.nova.loyalty.points.grpc.v1.PointsServiceGrpc;
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
+import java.util.concurrent.TimeUnit;
+import org.springframework.stereotype.Component;
+
+@Component
+public class GrpcPointsClient {
+
+    private final PointsServiceGrpc.PointsServiceBlockingStub stub;
+    private final ManagedChannel channel;
+
+    public GrpcPointsClient() {
+        this.channel = ManagedChannelBuilder
+                .forAddress("nova-points-grpc", 9090)
+                .useTransportSecurity()
+                .build();
+        this.stub = PointsServiceGrpc.newBlockingStub(channel);
+    }
+
+    public long getBalance(long memberId) {
+        GetBalanceRequest request = GetBalanceRequest.newBuilder()
+                .setMemberId(memberId)
+                .build();
+        GetBalanceResponse response = stub
+                .withDeadlineAfter(2, TimeUnit.SECONDS)
+                .getBalance(request);
+        return response.getBalance();
+    }
+}
+```
+
+Dependency tương ứng trong `pom.xml` gồm `io.grpc:grpc-netty-shaded`, `io.grpc:grpc-protobuf`, `io.grpc:grpc-stub` và plugin sinh code từ file `.proto` trong bước build. Hãy đối chiếu phiên bản với tài liệu của thư viện gRPC đang dùng trước khi pin vào dự án thật.
+
+## Sai lầm thường gặp
+
+### 1. Đưa gRPC ra bề mặt công khai cho đối tác
+
+- **Triệu chứng:** Đối tác tích hợp chậm, liên tục xin hỗ trợ, và đội ngũ phải dựng thêm lớp REST bao ngoài gRPC.
+- **Nguyên nhân:** Chọn giao thức theo sở thích kỹ thuật nội bộ mà bỏ qua việc client nằm ngoài tầm kiểm soát của team.
+- **Fix:** Giữ REST + JSON + OpenAPI cho API công khai qua gateway; gRPC chỉ ở các hop nội bộ do cùng một tổ chức kiểm soát cả hai đầu.
+
+### 2. Vỡ tương thích protobuf vì tái dùng số trường
+
+- **Triệu chứng:** Client cũ đọc dữ liệu sai lệch âm thầm sau một lần đổi schema tưởng như vô hại.
+- **Nguyên nhân:** Xóa một trường rồi dùng lại số của nó cho ý nghĩa mới; trong protobuf, số trường là danh tính thật của dữ liệu đã lưu và đang truyền.
+- **Fix:** Không bao giờ tái dùng số trường đã xóa, đánh dấu chúng là reserved, và thêm trường mới bằng số mới.
+
+### 3. Quên deadline cho lời gọi gRPC
+
+- **Triệu chứng:** Một service nội bộ chậm làm thread của phía gọi bị giữ lâu và lan thành quá tải dây chuyền, y hệt lỗi thiếu timeout ở HTTP.
+- **Nguyên nhân:** Nghĩ rằng gRPC tự quản lý thời gian chờ hợp lý, trong khi mặc định lời gọi có thể không có deadline hiệu dụng.
+- **Fix:** Đặt deadline cho mọi lời gọi gRPC, nhỏ hơn ngân sách của tầng gọi phía trên, và xử lý trạng thái hết deadline như một lỗi có thể retry có kiểm soát.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được; trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay, không có chấm tự động.
+
+1. Lập bảng quyết định cho năm lời gọi của Nova Loyalty (đối tác tra điểm, web xem quà, service điểm gọi service khuyến mãi, truyền sự kiện số dư liên tục nội bộ, webhook ra ngoài) và chọn giao thức cho từng lời gọi kèm lý do.
+2. Viết một file `.proto` hoàn chỉnh cho nghiệp vụ đổi quà, gồm một rpc unary và một rpc server streaming, tuân thủ kỷ luật đánh số trường.
+3. Liệt kê chi phí vận hành phát sinh nếu Nova chuyển hop nội bộ nóng nhất sang gRPC: gateway, giám sát, gỡ lỗi, đào tạo và công cụ.
+4. Mô tả một thay đổi schema ở REST và một thay đổi schema ở protobuf cùng phá vỡ tương thích, và cách process của team phát hiện từng loại trước khi lên production.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Framework — REST Clients và WebClient/RestClient: https://docs.spring.io/spring-framework/reference/integration/rest-clients.html
+- RFC 9113 — HTTP/2 (nền vận chuyển của gRPC): https://datatracker.ietf.org/doc/html/rfc9113
+- Spring Boot — Web Reference: https://docs.spring.io/spring-boot/reference/web/index.html
+
+## Đọc thêm
+
+- Tài liệu gRPC và Protocol Buffers trên trang chủ của dự án (không chính thức theo whitelist của khóa học — nguồn cộng đồng/dự án, dùng để tham khảo chi tiết cú pháp `.proto`): https://grpc.io/docs/

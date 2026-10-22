@@ -1,0 +1,218 @@
+---
+title: "Xác thực service-to-service: JWT nội bộ, client credentials và mTLS"
+module: 6
+level: "Senior"
+duration: 55
+order: 3
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x", "Spring Security 6.3.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Thiết kế được cơ chế xác thực cho lời gọi nội bộ giữa các service của Nova Loyalty: ai là phía gọi, bằng chứng nào, và phía nhận kiểm chứng ra sao.
+- Phân biệt được ba lớp có thể kết hợp: JWT nội bộ ngắn hạn, OAuth2 client credentials, và mTLS ở tầng vận chuyển.
+- Cài đặt được việc truyền tiếp (propagation) danh tính người dùng gốc qua các hop mà không trộn lẫn với danh tính của chính service đang gọi.
+
+## Vì sao cần biết
+
+Khi service điểm của Nova Loyalty gọi service quà rồi service CRM, câu hỏi "ai đang gọi" có hai tầng hoàn toàn khác nhau: service nào đang gọi (danh tính máy) và hành động này đang làm thay mặt khách hàng nào (danh tính người dùng gốc). Trộn hai tầng này là nguồn của nhiều lỗ hổng nghiêm trọng: một service bị xâm nhập có thể dùng chính token của nó để mạo danh mọi khách hàng, hoặc log điều tra không còn phân biệt được thao tác do hệ thống tự khởi tạo với thao tác do khách hàng yêu cầu. Nova xử lý giao dịch điểm tiền thật của khách hàng, nên kỷ luật danh tính nội bộ là yêu cầu kiến trúc, không phải điểm cộng.
+
+## Nội dung chính
+
+### Hai loại danh tính không được trộn
+
+- Danh tính workload: chính service đang gọi, xác thực bằng credential của nó (client credentials, chứng thư mTLS, hoặc token nội bộ do hạ tầng cấp).
+- Danh tính chủ thể gốc: người dùng hoặc hệ thống đã khởi tạo chuỗi lời gọi, được truyền tiếp qua các hop để phía cuối vẫn phân quyền và ghi log đúng chủ thể.
+
+Một lời gọi nội bộ đúng thiết kế mang được cả hai: phía nhận biết service gọi là ai và được phép gọi endpoint này hay không, đồng thời biết thao tác thuộc về khách hàng nào để kiểm tra quyền sở hữu như ở bài method security.
+
+### OAuth2 client credentials cho danh tính workload
+
+Trong grant client credentials của OAuth2, một service dùng `client_id` và bí mật của nó (hoặc chứng thư) để xin một access token ngắn hạn từ authorization server, mang scope chỉ đúng các quyền nó cần, rồi gửi token đó trong header `Authorization` khi gọi service bạn. Phía nhận verify token như một resource server bình thường và kiểm tra scope.
+
+Nguyên tắc least privilege áp ở đây một cách nghiêm ngặt: service quà chỉ xin scope đọc thông tin quà cần thiết, không xin scope ghi điểm; token phải ngắn hạn và tự động được cấp mới, không có token nội bộ sống vô thời hạn được chép cứng trong cấu hình.
+
+### JWT nội bộ tự cấp: khi nào chấp nhận được
+
+Một số hệ thống cho một thành phần tin cậy ký JWT nội bộ ngắn hạn thay cho vòng qua authorization server. Cách này chỉ an toàn khi có đủ các điều kiện: khóa ký được quản lý và xoay vòng đúng cách, thời hạn token rất ngắn, claim `iss` và `aud` được ghim chặt cho từng phía nhận, và mọi phía nhận đều verify đầy đủ như với token bên ngoài. Thiếu một trong các điều kiện này, JWT tự chế biến thành một bí mật dùng chung khó thu hồi.
+
+### mTLS: xác thực ở tầng vận chuyển
+
+mTLS (xem nhập môn ở Module 05) cho phía nhận một bằng chứng mạnh về workload: chứng thư của phía gọi do PKI nội bộ cấp. mTLS và token ở tầng ứng dụng bổ sung cho nhau: mTLS trả lời "kết nối này từ workload nào", token trả lời "lời gọi này mang quyền và chủ thể nào". Với các hop nhạy cảm nhất (liên quan tới điều chỉnh điểm), Nova nên cân nhắc kết hợp cả hai khi hạ tầng chứng thư cho phép.
+
+### Truyền tiếp danh tính người dùng gốc
+
+Khi chuỗi lời gọi bắt đầu từ một người dùng đã xác thực, token của người dùng (hoặc một token trao đổi từ nó với `aud` thu hẹp cho hop nội bộ) cần đi tiếp cùng lời gọi. Hai cài đặt sai phổ biến:
+
+- Service ở giữa vứt token gốc và chỉ gửi credential của chính nó: phía cuối mất khả năng phân quyền theo chủ sở hữu và audit sai chủ thể.
+- Service ở giữa chuyển tiếp nguyên token gốc có `aud` cho bề mặt công khai vào mạng nội bộ: mở rộng bề mặt sử dụng của token ra ngoài ý định ban đầu.
+
+Thiết kế đúng thường là token exchange: đổi token gốc lấy một token nội bộ ngắn hạn, giữ nguyên `sub` của chủ thể gốc, thu hẹp `aud` và scope cho đúng hop tiếp theo, và ghi rõ service trung gian trong claim dành cho actor.
+
+<Mermaid chart={`sequenceDiagram
+  autonumber
+  Client->>Points: Bearer user token, aud cho be mat cong khai
+  Points->>AuthServer: Token exchange kem client credentials cua Points
+  AuthServer-->>Points: Token noi bo ngan han, sub giu nguyen, aud thu hep
+  Points->>Gift: Token noi bo + header dinh danh workload
+  Gift->>Gift: Verify token, kiem tra scope va chu so huu
+`} label="Token exchange giữ nguyên chủ thể gốc trong khi thu hẹp audience và scope cho hop nội bộ, thay vì chuyển tiếp nguyên token công khai." />
+
+## Code
+
+Phía gọi: interceptor gắn token nội bộ vào mọi request của `RestClient`. Token ở đây được lấy từ một provider có cache và tự làm mới trước khi hết hạn, không lấy cứng từ cấu hình.
+
+```java filename=ServiceTokenInterceptor.java
+package com.nova.loyalty.security;
+
+import java.io.IOException;
+import java.time.Instant;
+import org.springframework.http.HttpRequest;
+import org.springframework.http.client.ClientHttpRequestExecution;
+import org.springframework.http.client.ClientHttpRequestInterceptor;
+import org.springframework.http.client.ClientHttpResponse;
+import org.springframework.stereotype.Component;
+
+@Component
+public class ServiceTokenInterceptor implements ClientHttpRequestInterceptor {
+
+    private final ServiceTokenProvider tokenProvider;
+
+    public ServiceTokenInterceptor(ServiceTokenProvider tokenProvider) {
+        this.tokenProvider = tokenProvider;
+    }
+
+    @Override
+    public ClientHttpResponse intercept(HttpRequest request, byte[] body,
+                                        ClientHttpRequestExecution execution) throws IOException {
+        ServiceToken token = tokenProvider.currentToken();
+        if (token == null || token.expiresAt().isBefore(Instant.now())) {
+            token = tokenProvider.refresh();
+        }
+        request.getHeaders().setBearerAuth(token.value());
+        return execution.execute(request, body);
+    }
+
+    public record ServiceToken(String value, Instant expiresAt) {
+    }
+
+    public interface ServiceTokenProvider {
+        ServiceToken currentToken();
+
+        ServiceToken refresh();
+    }
+}
+```
+
+Phía nhận: resource server kiểm tra scope cho endpoint nội bộ bằng cấu hình chain riêng, tách khỏi chain của traffic người dùng:
+
+```java filename=InternalApiSecurityConfig.java
+package com.nova.loyalty.security;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.annotation.Order;
+import org.springframework.security.config.Customizer;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
+import org.springframework.security.oauth2.server.resource.authentication.JwtGrantedAuthoritiesConverter;
+import org.springframework.security.web.SecurityFilterChain;
+
+@Configuration
+@EnableWebSecurity
+public class InternalApiSecurityConfig {
+
+    @Bean
+    @Order(1)
+    public SecurityFilterChain internalChain(HttpSecurity http) throws Exception {
+        JwtGrantedAuthoritiesConverter scopes = new JwtGrantedAuthoritiesConverter();
+        scopes.setAuthorityPrefix("SCOPE_");
+        scopes.setAuthoritiesClaimName("scope");
+        JwtAuthenticationConverter converter = new JwtAuthenticationConverter();
+        converter.setJwtGrantedAuthoritiesConverter(scopes);
+
+        http
+            .securityMatcher("/internal/**")
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/internal/gifts/**").hasAuthority("SCOPE_gift.read")
+                .requestMatchers("/internal/points/adjust").hasAuthority("SCOPE_points.adjust")
+                .anyRequest().denyAll())
+            .oauth2ResourceServer(oauth2 -> oauth2
+                .jwt(jwt -> jwt.jwtAuthenticationConverter(converter)))
+            .csrf(csrf -> csrf.disable());
+        return http.build();
+    }
+}
+```
+
+Cấu hình phía service gọi để xin token bằng client credentials (khóa cấu hình thực tế lấy từ kho bí mật của môi trường, không ghi giá trị thật vào file):
+
+```yaml filename=application.yml
+spring:
+  security:
+    oauth2:
+      client:
+        registration:
+          nova-internal:
+            provider: nova-auth
+            client-id: ${NOVA_CLIENT_ID}
+            client-secret: ${NOVA_CLIENT_SECRET}
+            authorization-grant-type: client_credentials
+            scope: gift.read
+        provider:
+          nova-auth:
+            issuer-uri: https://auth.internal.nova.example.com
+```
+
+## Sai lầm thường gặp
+
+### 1. Một token nội bộ dùng chung cho mọi service
+
+- **Triệu chứng:** Không phân biệt được service nào đã gọi trong log, và khi một service lộ credential thì toàn bộ mạng nội bộ bị mở theo.
+- **Nguyên nhân:** Dùng một bí mật/token tĩnh dùng chung thay vì danh tính riêng cho từng workload với scope tối thiểu.
+- **Fix:** Mỗi service một danh tính riêng, scope least privilege theo đúng endpoint nó cần gọi, token ngắn hạn và tự cấp mới.
+
+### 2. Vứt bỏ danh tính người dùng gốc ở hop giữa
+
+- **Triệu chứng:** Phía cuối không kiểm tra được quyền sở hữu và audit ghi mọi thao tác là của service trung gian.
+- **Nguyên nhân:** Service ở giữa chỉ gửi credential của chính nó, không truyền tiếp chủ thể gốc dưới bất kỳ hình thức nào.
+- **Fix:** Truyền tiếp chủ thể gốc bằng token exchange giữ nguyên `sub`, thu hẹp `aud`/scope và ghi rõ actor trung gian.
+
+### 3. Chuyển tiếp nguyên token công khai vào nội bộ
+
+- **Triệu chứng:** Token dành cho bề mặt công khai qua `/v4/{gs,os,ws}/*` xuất hiện trong traffic nội bộ và được các service nội bộ chấp nhận.
+- **Nguyên nhân:** Tiện tay forward nguyên header `Authorization` gốc cho mọi hop mà không kiểm tra `aud`.
+- **Fix:** Mọi phía nhận đều kiểm tra `aud` của đúng mình; ở biên nội bộ, đổi token gốc thành token nội bộ ngắn hạn trước khi đi tiếp.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được; trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay, không có chấm tự động.
+
+1. Vẽ chuỗi lời gọi từ khách hàng qua service điểm tới service quà và CRM, ghi cho mỗi hop: danh tính workload là gì, chủ thể gốc được mang theo bằng cách nào, và phía nhận kiểm tra những gì.
+2. Lập bảng scope tối thiểu cho ba service của Nova: mỗi service cần gọi endpoint nội bộ nào của service bạn và cần scope gì, scope gì bị cấm rõ ràng.
+3. Viết phân tích đánh đổi giữa ba lựa chọn cho một hop nhạy cảm (chỉ client credentials, chỉ mTLS, kết hợp cả hai) theo các trục: độ mạnh xác thực, chi phí hạ tầng, khả năng thu hồi khi lộ.
+4. Mô tả kịch bản một service bị xâm nhập trong hai thiết kế (token dùng chung tĩnh và danh tính riêng ngắn hạn) và chỉ ra phạm vi thiệt hại khác nhau ra sao.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Spring Security — OAuth2 Client, Client Credentials Grant: https://docs.spring.io/spring-security/reference/servlet/oauth2/client/index.html
+- Spring Security — OAuth2 Resource Server: https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/index.html
+- RFC 6749 — The OAuth 2.0 Authorization Framework: https://datatracker.ietf.org/doc/html/rfc6749
+
+## Đọc thêm
+
+Không có.

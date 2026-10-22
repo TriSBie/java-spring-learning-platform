@@ -1,0 +1,185 @@
+---
+title: "Builder cho Report Criteria Phức Tạp"
+module: 7
+level: "Junior"
+duration: 35
+order: 3
+version_pins: ["Java 21", "Spring Boot 3.3.x", "Spring Framework 6.1.x"]
+updated: "2026-10-22"
+---
+
+## Mục tiêu
+
+- Xây dựng được class criteria bất biến với Builder nội bộ, hỗ trợ ít nhất 6 trường tùy chọn và giá trị mặc định hợp lý.
+- Đặt được toàn bộ validation tập trung trong method `build()` và ném lỗi mô tả rõ trường nào không hợp lệ.
+- So sánh được Builder với constructor dài và factory method, chọn đúng công cụ cho từng tình huống.
+
+## Vì sao cần biết
+
+Datasource `report` của Nova Loyalty phục vụ hàng chục báo cáo điểm: theo khoảng ngày, theo đối tác, theo loại giao dịch, theo hạng thành viên, có báo cáo cần phân trang và sắp xếp khác nhau. Một constructor 8 tham số với nhiều tham số cùng kiểu `String` rất dễ gọi nhầm thứ tự mà compiler không hề cảnh báo. Builder cho phép đội vận hành và code gọi dựng tiêu chí báo cáo theo từng bước có tên rõ ràng, đồng thời chặn tổ hợp không hợp lệ ngay tại thời điểm dựng đối tượng, trước khi câu truy vấn tốn kém chạy trên datasource báo cáo.
+
+## Nội dung chính
+
+### Vấn đề
+
+Đối tượng tiêu chí báo cáo có nhiều trường, phần lớn là tùy chọn.
+Constructor dài với nhiều tham số cùng kiểu gây nhầm thứ tự khi gọi.
+Việc validate rải rác ở service khiến cùng một tổ hợp sai bị chặn ở nơi này nhưng lọt ở nơi khác.
+Đối tượng có thể bị sửa sau khi tạo làm truy vấn đang chạy thay đổi giữa chừng.
+
+### Giải pháp
+
+Tạo class bất biến với constructor private.
+Cung cấp Builder tĩnh nội bộ với method chuỗi theo tên từng trường.
+Giá trị mặc định được đặt ngay trong Builder.
+Toàn bộ validation nằm trong `build()` để mọi đường tạo đối tượng đều qua một cổng kiểm tra.
+
+<Mermaid chart={`flowchart LR
+  A[Builder rỗng] --> B[Đặt khoảng ngày]
+  B --> C[Đặt bộ lọc tùy chọn]
+  C --> D[build - validate]
+  D --> E[ReportCriteria bất biến]`} label="Builder: dựng từng bước, validate một lần tại build" />
+
+Fluent API tốt phải đọc như một câu mô tả tiêu chí.
+Tên method nên trùng ngôn ngữ nghiệp vụ của đội báo cáo.
+Builder không nên lộ ra trạng thái nửa vời: chỉ `build()` mới sinh đối tượng hoàn chỉnh.
+
+### Trade-off
+
+Ưu điểm là lời gọi tự mô tả, an toàn thứ tự tham số và validation tập trung.
+Nhược điểm là tốn thêm một class Builder và nhiều code lặp cho từng trường.
+Với đối tượng chỉ có 2 hoặc 3 trường bắt buộc, constructor hoặc static factory vẫn gọn hơn.
+Record của Java 21 rất tốt cho dữ liệu bất biến đơn giản, nhưng không tự giải quyết bài toán nhiều trường tùy chọn.
+
+## Code
+
+Package mẫu là `com.nova.loyalty.report`. Không cần dependency ngoài JDK 21.
+
+```java filename=ReportCriteria.java
+package com.nova.loyalty.report;
+
+import java.time.LocalDate;
+import java.util.Objects;
+
+public final class ReportCriteria {
+
+    private final LocalDate fromDate;
+    private final LocalDate toDate;
+    private final String partnerCode;
+    private final String transactionType;
+    private final String memberTier;
+    private final int page;
+    private final int size;
+    private final String sortField;
+
+    private ReportCriteria(Builder builder) {
+        this.fromDate = builder.fromDate;
+        this.toDate = builder.toDate;
+        this.partnerCode = builder.partnerCode;
+        this.transactionType = builder.transactionType;
+        this.memberTier = builder.memberTier;
+        this.page = builder.page;
+        this.size = builder.size;
+        this.sortField = builder.sortField;
+    }
+
+    public static Builder builder() {
+        return new Builder();
+    }
+
+    public LocalDate fromDate() { return fromDate; }
+    public LocalDate toDate() { return toDate; }
+    public String partnerCode() { return partnerCode; }
+    public String transactionType() { return transactionType; }
+    public String memberTier() { return memberTier; }
+    public int page() { return page; }
+    public int size() { return size; }
+    public String sortField() { return sortField; }
+
+    public static final class Builder {
+        private LocalDate fromDate;
+        private LocalDate toDate;
+        private String partnerCode;
+        private String transactionType;
+        private String memberTier;
+        private int page = 0;
+        private int size = 50;
+        private String sortField = "createdAt";
+
+        public Builder fromDate(LocalDate value) { this.fromDate = value; return this; }
+        public Builder toDate(LocalDate value) { this.toDate = value; return this; }
+        public Builder partnerCode(String value) { this.partnerCode = value; return this; }
+        public Builder transactionType(String value) { this.transactionType = value; return this; }
+        public Builder memberTier(String value) { this.memberTier = value; return this; }
+        public Builder page(int value) { this.page = value; return this; }
+        public Builder size(int value) { this.size = value; return this; }
+        public Builder sortField(String value) { this.sortField = value; return this; }
+
+        public ReportCriteria build() {
+            Objects.requireNonNull(fromDate, "fromDate is required");
+            Objects.requireNonNull(toDate, "toDate is required");
+            if (toDate.isBefore(fromDate)) {
+                throw new IllegalArgumentException("toDate must not be before fromDate");
+            }
+            if (page < 0) {
+                throw new IllegalArgumentException("page must not be negative");
+            }
+            if (size < 1 || size > 500) {
+                throw new IllegalArgumentException("size must be between 1 and 500");
+            }
+            return new ReportCriteria(this);
+        }
+    }
+}
+```
+
+## Sai lầm thường gặp
+
+### 1. Validate rải rác ngoài build
+
+- **Triệu chứng:** Cùng một tiêu chí sai bị chặn ở API nhưng lại chạy được qua job nội bộ.
+- **Nguyên nhân:** Mỗi nơi gọi tự kiểm tra một phần, không có cổng kiểm tra duy nhất.
+- **Fix:** Chuyển toàn bộ validation vào `build()` và cấm tạo đối tượng bằng đường khác.
+
+### 2. Builder dùng lại sau khi đã build
+
+- **Triệu chứng:** Sửa Builder sau khi build làm người đọc tưởng đối tượng đã tạo cũng thay đổi, gây bug khó lần.
+- **Nguyên nhân:** Builder giữ tham chiếu tới các collection mutable được truyền thẳng vào đối tượng.
+- **Fix:** Sao chép phòng thủ các collection trong constructor và coi Builder là dùng một lần cho mỗi đối tượng.
+
+### 3. Nhồi quá nhiều trường vào một criteria
+
+- **Triệu chứng:** Builder dài hàng chục method, không ai nhớ trường nào bắt buộc.
+- **Nguyên nhân:** Một đối tượng criteria bị dùng cho mọi loại báo cáo khác bản chất.
+- **Fix:** Tách criteria theo nhóm báo cáo cùng bản chất; trường bắt buộc nên cân nhắc đưa vào method khởi tạo Builder.
+
+## Checklist tự kiểm
+
+Đánh dấu các mục bạn đã thực sự làm được. Trạng thái được lưu trên trình duyệt này.
+
+<LessonChecklist />
+
+## Workbook
+
+Các bài tập dưới đây làm bằng tay — không có chấm tự động.
+
+1. **Thiết kế:** Thêm 2 trường tùy chọn mới cho criteria (ví dụ kênh giao dịch, mã cửa hàng) kèm mặc định và validation phù hợp.
+2. **Đọc code:** Liệt kê mọi tổ hợp không hợp lệ mà `build()` hiện chưa chặn và đề xuất rule bổ sung.
+3. **Viết tay:** Viết 3 lời gọi Builder cho 3 báo cáo thực tế khác nhau và nhận xét mức dễ đọc so với constructor 8 tham số.
+4. **Phản biện:** Khi nào nên dùng record kèm static factory thay cho Builder? Cho một ví dụ cụ thể trong domain loyalty.
+
+## Quiz
+
+10 câu trắc nghiệm, chấm ngay tại chỗ, điểm được lưu vào trang Progress.
+
+<LessonQuiz />
+
+## Tài liệu chính thức
+
+- Dev.java — Records và thiết kế dữ liệu bất biến: https://dev.java/learn/records/
+- OpenJDK — JDK 21 Documentation: https://openjdk.org/projects/jdk/21/
+- Spring Framework — Core Technologies: https://docs.spring.io/spring-framework/reference/core.html
+
+## Đọc thêm
+
+Không có.
